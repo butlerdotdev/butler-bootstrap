@@ -13,7 +13,7 @@ env:
 jobs:
   build:
     runs-on: butler-runners
-    container: golang:1.23-alpine
+    container: golang:1.24-alpine
     steps:
       - name: Install dependencies
         run: apk add --no-cache make git bash curl
