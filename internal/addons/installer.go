@@ -143,7 +143,7 @@ func (i *Installer) ensurePrivilegedNamespace(ctx context.Context, kubeconfigPat
 	return nil
 }
 
-// InstallKubeVip installs kube-vip for control plane HA
+// InstallKubeVip installs kube-vip for control plane HA ONLY.
 func (i *Installer) InstallKubeVip(ctx context.Context, kubeconfig []byte, vip string, iface string, version string) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
@@ -167,7 +167,7 @@ func (i *Installer) InstallKubeVip(ctx context.Context, kubeconfig []byte, vip s
 		vipCIDR = parts[1]
 	}
 
-	logger.Info("Installing kube-vip", "vip", vip, "cidr", vipCIDR, "interface", iface, "version", version)
+	logger.Info("Installing kube-vip (control plane VIP only)", "vip", vip, "cidr", vipCIDR, "interface", iface, "version", version)
 
 	// Ensure kube-system is privileged (should already be, but be safe)
 	i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "kube-system")
@@ -208,6 +208,9 @@ kind: DaemonSet
 metadata:
   name: kube-vip
   namespace: kube-system
+  labels:
+    app.kubernetes.io/name: kube-vip
+    app.kubernetes.io/component: control-plane-vip
 spec:
   selector:
     matchLabels:
@@ -246,6 +249,9 @@ spec:
               value: "true"
             - name: cp_namespace
               value: kube-system
+            # NOTE: svc_enable is intentionally NOT set (defaults to false)
+            # MetalLB handles LoadBalancer services - do not enable here
+            # to avoid IP conflicts between kube-vip and MetalLB
             - name: vip_leaderelection
               value: "true"
             - name: vip_leasename
@@ -421,7 +427,7 @@ func (i *Installer) InstallLonghorn(ctx context.Context, kubeconfig []byte, vers
 	return nil
 }
 
-// InstallMetalLB installs MetalLB load balancer
+// InstallMetalLB installs MetalLB load balancer with the specified address pool.
 func (i *Installer) InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
@@ -429,6 +435,10 @@ func (i *Installer) InstallMetalLB(ctx context.Context, kubeconfig []byte, addre
 		return err
 	}
 	defer cleanup()
+
+	if addressPool == "" {
+		return fmt.Errorf("addressPool is required for MetalLB installation")
+	}
 
 	logger.Info("Installing MetalLB", "addressPool", addressPool)
 
@@ -643,7 +653,10 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 // InstallCAPI installs Cluster API with the specified infrastructure providers
 func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Installing CAPI", "version", version, "mgmtProvider", mgmtProvider)
+
+	useKubevirt := mgmtProvider == "harvester"
+
+	logger.Info("Installing CAPI", "version", version, "mgmtProvider", mgmtProvider, "useKubevirt", useKubevirt)
 
 	// Make kubeconfig insecure for clusterctl compatibility with self-signed certs
 	insecureKubeconfig, err := makeKubeconfigInsecure(kubeconfig)
@@ -657,25 +670,29 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	}
 	defer cleanup()
 
-	// Build provider list - always include mgmt provider
-	providers := []string{mgmtProvider}
-	for _, p := range additionalProviders {
-		if p.Name != mgmtProvider {
-			providers = append(providers, p.Name)
-		}
-	}
-
-	infraArg := strings.Join(providers, ",")
-
+	// Build clusterctl args - don't include infrastructure if using kubevirt
+	// clusterctl has issues fetching kubevirt provider metadata from GitHub
 	args := []string{
 		"init",
 		"--kubeconfig", kubeconfigPath,
 		"--bootstrap", "kubeadm",
 		"--control-plane", "kamaji",
-		"--infrastructure", infraArg,
 	}
 
-	logger.Info("Running clusterctl init", "infrastructure", infraArg)
+	// Only add infrastructure flag if NOT using kubevirt
+	if !useKubevirt {
+		providers := []string{mgmtProvider}
+		for _, p := range additionalProviders {
+			if p.Name != mgmtProvider {
+				providers = append(providers, p.Name)
+			}
+		}
+		infraArg := strings.Join(providers, ",")
+		args = append(args, "--infrastructure", infraArg)
+		logger.Info("Running clusterctl init", "infrastructure", infraArg)
+	} else {
+		logger.Info("Running clusterctl init without infrastructure (will install capk separately)")
+	}
 
 	cmd := exec.CommandContext(ctx, "clusterctl", args...)
 	output, err := cmd.CombinedOutput()
@@ -683,13 +700,30 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 		return fmt.Errorf("clusterctl init failed: %w, output: %s", err, string(output))
 	}
 
-	logger.Info("CAPI installed successfully")
+	logger.Info("CAPI core installed successfully")
 
-	// Ensure CAPI namespaces have privileged PSA (clusterctl creates these)
+	// Install kubevirt provider directly if needed
+	// This avoids clusterctl's GitHub metadata fetch issues
+	if useKubevirt {
+		logger.Info("Installing kubevirt infrastructure provider directly")
+
+		// Ensure namespace exists and is privileged
+		if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "capk-system"); err != nil {
+			logger.Info("Failed to prepare capk-system namespace", "error", err)
+		}
+
+		capkURL := "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
+		if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", capkURL); err != nil {
+			return fmt.Errorf("failed to install capk: %w", err)
+		}
+		logger.Info("kubevirt provider installed successfully")
+	}
+
+	// Ensure CAPI namespaces have privileged PSA
 	capiNamespaces, err := i.getCAPINamespaces(ctx, kubeconfigPath)
 	if err != nil {
 		logger.Info("Failed to list CAPI namespaces, using defaults", "error", err)
-		capiNamespaces = []string{"capi-system", "capi-kubeadm-bootstrap-system"}
+		capiNamespaces = []string{"capi-system", "capi-kubeadm-bootstrap-system", "capk-system"}
 	}
 	for _, ns := range capiNamespaces {
 		if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, ns); err != nil {
