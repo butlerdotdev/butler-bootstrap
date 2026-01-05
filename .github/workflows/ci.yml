@@ -1,4 +1,3 @@
-# .github/workflows/ci.yml
 name: CI
 
 on:
@@ -14,12 +13,12 @@ env:
 jobs:
   build:
     runs-on: butler-runners
+    container: golang:1.23-alpine
     steps:
-      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: apk add --no-cache make git bash curl
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
+      - uses: actions/checkout@v4
 
       - name: Build
         run: make build
