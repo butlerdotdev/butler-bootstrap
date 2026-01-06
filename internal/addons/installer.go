@@ -657,9 +657,7 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec) error {
 	logger := log.FromContext(ctx)
 
-	useKubevirt := mgmtProvider == "harvester"
-
-	logger.Info("Installing CAPI", "version", version, "mgmtProvider", mgmtProvider, "useKubevirt", useKubevirt)
+	logger.Info("Installing CAPI", "version", version, "mgmtProvider", mgmtProvider)
 
 	// Make kubeconfig insecure for clusterctl compatibility with self-signed certs
 	insecureKubeconfig, err := makeKubeconfigInsecure(kubeconfig)
@@ -673,29 +671,17 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	}
 	defer cleanup()
 
-	// Build clusterctl args - don't include infrastructure if using kubevirt
-	// clusterctl has issues fetching kubevirt provider metadata from GitHub
+	// Install CAPI core WITHOUT infrastructure providers
+	// We install infra providers manually to avoid clusterctl env var requirements
 	args := []string{
 		"init",
 		"--kubeconfig", kubeconfigPath,
 		"--bootstrap", "kubeadm",
 		"--control-plane", "kamaji",
+		// NO --infrastructure flag - we install providers manually
 	}
 
-	// Only add infrastructure flag if NOT using kubevirt
-	if !useKubevirt {
-		providers := []string{mgmtProvider}
-		for _, p := range additionalProviders {
-			if p.Name != mgmtProvider {
-				providers = append(providers, p.Name)
-			}
-		}
-		infraArg := strings.Join(providers, ",")
-		args = append(args, "--infrastructure", infraArg)
-		logger.Info("Running clusterctl init", "infrastructure", infraArg)
-	} else {
-		logger.Info("Running clusterctl init without infrastructure (will install capk separately)")
-	}
+	logger.Info("Running clusterctl init (core components only)")
 
 	cmd := exec.CommandContext(ctx, "clusterctl", args...)
 	output, err := cmd.CombinedOutput()
@@ -705,28 +691,25 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 
 	logger.Info("CAPI core installed successfully")
 
-	// Install kubevirt provider directly if needed
-	// This avoids clusterctl's GitHub metadata fetch issues
-	if useKubevirt {
-		logger.Info("Installing kubevirt infrastructure provider directly")
+	// Install infrastructure provider manually
+	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider); err != nil {
+		return fmt.Errorf("failed to install %s provider: %w", mgmtProvider, err)
+	}
 
-		// Ensure namespace exists and is privileged
-		if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "capk-system"); err != nil {
-			logger.Info("Failed to prepare capk-system namespace", "error", err)
+	// Install any additional providers
+	for _, p := range additionalProviders {
+		if p.Name != mgmtProvider {
+			if err := i.installInfraProvider(ctx, kubeconfigPath, p.Name); err != nil {
+				logger.Info("Failed to install additional provider", "provider", p.Name, "error", err)
+			}
 		}
-
-		capkURL := "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
-		if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", capkURL); err != nil {
-			return fmt.Errorf("failed to install capk: %w", err)
-		}
-		logger.Info("kubevirt provider installed successfully")
 	}
 
 	// Ensure CAPI namespaces have privileged PSA
 	capiNamespaces, err := i.getCAPINamespaces(ctx, kubeconfigPath)
 	if err != nil {
 		logger.Info("Failed to list CAPI namespaces, using defaults", "error", err)
-		capiNamespaces = []string{"capi-system", "capi-kubeadm-bootstrap-system", "capk-system"}
+		capiNamespaces = []string{"capi-system", "capi-kubeadm-bootstrap-system"}
 	}
 	for _, ns := range capiNamespaces {
 		if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, ns); err != nil {
@@ -739,6 +722,47 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 		return fmt.Errorf("CAPI controllers not ready: %w", err)
 	}
 
+	return nil
+}
+
+// installInfraProvider installs a CAPI infrastructure provider via kubectl apply
+func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string) error {
+	logger := log.FromContext(ctx)
+
+	var providerURL string
+	var namespace string
+
+	switch provider {
+	case "harvester":
+		namespace = "capk-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
+	case "nutanix":
+		namespace = "capx-system"
+		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.4.0/infrastructure-components.yaml"
+	case "vsphere":
+		namespace = "capv-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.11.0/infrastructure-components.yaml"
+	case "proxmox":
+		namespace = "capmox-system"
+		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.6.0/infrastructure-components.yaml"
+	default:
+		logger.Info("Unknown provider, skipping", "provider", provider)
+		return nil
+	}
+
+	logger.Info("Installing infrastructure provider", "provider", provider, "namespace", namespace)
+
+	// Ensure namespace exists and is privileged
+	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, namespace); err != nil {
+		logger.Info("Failed to prepare provider namespace", "namespace", namespace, "error", err)
+	}
+
+	// Install via kubectl apply
+	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", providerURL); err != nil {
+		return fmt.Errorf("failed to apply provider manifests: %w", err)
+	}
+
+	logger.Info("Infrastructure provider installed", "provider", provider)
 	return nil
 }
 
