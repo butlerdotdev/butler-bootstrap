@@ -15,7 +15,6 @@ package addons
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
