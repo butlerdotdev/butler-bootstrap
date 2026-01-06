@@ -1068,14 +1068,22 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 
 	switch cb.Spec.Provider {
 	case "nutanix":
+		// Endpoint, port, insecure come from ProviderConfig spec
+		// Username, password come from Secret
+		endpoint := providerConfig.Spec.Nutanix.Endpoint
+		port := "9440"
+		if providerConfig.Spec.Nutanix.Port > 0 {
+			port = fmt.Sprintf("%d", providerConfig.Spec.Nutanix.Port)
+		}
+
 		creds.Nutanix = &addons.NutanixCredentials{
-			Endpoint: string(secret.Data["endpoint"]),
+			Endpoint: endpoint,
 			Username: string(secret.Data["username"]),
 			Password: string(secret.Data["password"]),
-			Port:     string(secret.Data["port"]),
-			Insecure: string(secret.Data["insecure"]) == "true",
+			Port:     port,
+			Insecure: providerConfig.Spec.Nutanix.Insecure,
 		}
-		logger.Info("Retrieved Nutanix credentials", "endpoint", creds.Nutanix.Endpoint)
+		logger.Info("Retrieved Nutanix credentials", "endpoint", creds.Nutanix.Endpoint, "username", creds.Nutanix.Username)
 	case "harvester":
 		creds.Harvester = &addons.HarvesterCredentials{}
 	case "vsphere":
