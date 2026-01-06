@@ -657,7 +657,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 
 		iface := cb.Spec.Network.VIPInterface
 		if iface == "" {
-			iface = "enp1s0"
+			iface = r.getDefaultVIPInterface(cb.Spec.Provider)
 		}
 
 		if err := r.AddonInstaller.InstallKubeVip(ctx, kubeconfig, cb.Spec.Network.VIP, iface, version); err != nil {
@@ -1008,6 +1008,20 @@ func (r *ClusterBootstrapReconciler) getWorkerIPs(cb *butlerv1alpha1.ClusterBoot
 		}
 	}
 	return ips
+}
+
+// getDefaultVIPInterface returns the default network interface name for kube-vip based on provider
+func (r *ClusterBootstrapReconciler) getDefaultVIPInterface(provider string) string {
+	switch provider {
+	case "nutanix":
+		return "ens3"
+	case "harvester":
+		return "enp1s0"
+	case "proxmox":
+		return "eth0"
+	default:
+		return "eth0"
+	}
 }
 
 func boolPtr(b bool) *bool {
