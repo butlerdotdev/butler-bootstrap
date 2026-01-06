@@ -90,6 +90,9 @@ func (i *Installer) runHelm(ctx context.Context, kubeconfigPath string, args ...
 	// repo add/update don't need kubeconfig or server flags
 	if len(args) > 0 && args[0] == "repo" {
 		fullArgs = args
+		if len(args) > 1 && args[1] == "add" {
+			fullArgs = append(fullArgs, "--insecure-skip-tls-verify")
+		}
 	} else {
 		fullArgs = append(args, "--kubeconfig", kubeconfigPath, "--kube-insecure-skip-tls-verify")
 		if i.NodeIP != "" {
