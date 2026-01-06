@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
+	"github.com/butlerdotdev/butler-bootstrap/internal/addons"
 )
 
 const (
@@ -99,7 +100,7 @@ type AddonInstallerInterface interface {
 	InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
-	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec) error
+	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 }
 
@@ -812,9 +813,16 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				additionalProviders = addons.CAPI.InfrastructureProviders
 			}
 
+			// Get provider credentials from ProviderConfig
+			creds, err := r.getProviderCredentials(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to get provider credentials for CAPI")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+
 			logger.Info("Installing CAPI", "version", version, "mgmtProvider", mgmtProvider)
 
-			if err := r.AddonInstaller.InstallCAPI(ctx, kubeconfig, version, mgmtProvider, additionalProviders); err != nil {
+			if err := r.AddonInstaller.InstallCAPI(ctx, kubeconfig, version, mgmtProvider, additionalProviders, creds); err != nil {
 				logger.Error(err, "Failed to install CAPI")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
@@ -1022,6 +1030,69 @@ func (r *ClusterBootstrapReconciler) getDefaultVIPInterface(provider string) str
 	default:
 		return "eth0"
 	}
+}
+
+// getProviderCredentials fetches credentials from the ProviderConfig's Secret
+func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (*addons.ProviderCredentials, error) {
+	logger := log.FromContext(ctx)
+
+	// Get ProviderConfig
+	providerConfig := &butlerv1alpha1.ProviderConfig{}
+	providerNS := cb.Spec.ProviderRef.Namespace
+	if providerNS == "" {
+		providerNS = cb.Namespace
+	}
+
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      cb.Spec.ProviderRef.Name,
+		Namespace: providerNS,
+	}, providerConfig); err != nil {
+		return nil, fmt.Errorf("failed to get ProviderConfig: %w", err)
+	}
+
+	// Get credentials Secret
+	secret := &corev1.Secret{}
+	secretNS := providerConfig.Spec.CredentialsRef.Namespace
+	if secretNS == "" {
+		secretNS = providerConfig.Namespace
+	}
+
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      providerConfig.Spec.CredentialsRef.Name,
+		Namespace: secretNS,
+	}, secret); err != nil {
+		return nil, fmt.Errorf("failed to get credentials Secret: %w", err)
+	}
+
+	creds := &addons.ProviderCredentials{}
+
+	switch cb.Spec.Provider {
+	case "nutanix":
+		creds.Nutanix = &addons.NutanixCredentials{
+			Endpoint: string(secret.Data["endpoint"]),
+			Username: string(secret.Data["username"]),
+			Password: string(secret.Data["password"]),
+			Port:     string(secret.Data["port"]),
+			Insecure: string(secret.Data["insecure"]) == "true",
+		}
+		logger.Info("Retrieved Nutanix credentials", "endpoint", creds.Nutanix.Endpoint)
+	case "harvester":
+		creds.Harvester = &addons.HarvesterCredentials{}
+	case "vsphere":
+		creds.VSphere = &addons.VSphereCredentials{
+			Server:   string(secret.Data["server"]),
+			Username: string(secret.Data["username"]),
+			Password: string(secret.Data["password"]),
+		}
+	case "proxmox":
+		creds.Proxmox = &addons.ProxmoxCredentials{
+			Endpoint: string(secret.Data["endpoint"]),
+			Username: string(secret.Data["username"]),
+			Password: string(secret.Data["password"]),
+		}
+	}
+
+	return creds, nil
 }
 
 func boolPtr(b bool) *bool {

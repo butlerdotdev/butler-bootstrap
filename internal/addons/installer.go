@@ -15,7 +15,10 @@ package addons
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -30,6 +33,42 @@ type Installer struct {
 	KubectlPath string
 	HelmPath    string
 	NodeIP      string
+}
+
+// ProviderCredentials holds credentials for infrastructure providers
+type ProviderCredentials struct {
+	Nutanix   *NutanixCredentials
+	Harvester *HarvesterCredentials
+	VSphere   *VSphereCredentials
+	Proxmox   *ProxmoxCredentials
+}
+
+// NutanixCredentials holds Nutanix Prism Central credentials
+type NutanixCredentials struct {
+	Endpoint string
+	Username string
+	Password string
+	Port     string
+	Insecure bool
+}
+
+// HarvesterCredentials holds Harvester credentials
+type HarvesterCredentials struct {
+	// Harvester uses kubeconfig, no additional creds needed for CAPK
+}
+
+// VSphereCredentials holds vSphere credentials
+type VSphereCredentials struct {
+	Server   string
+	Username string
+	Password string
+}
+
+// ProxmoxCredentials holds Proxmox credentials
+type ProxmoxCredentials struct {
+	Endpoint string
+	Username string
+	Password string
 }
 
 // NewInstaller creates a new addon installer
@@ -654,7 +693,7 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 }
 
 // InstallCAPI installs Cluster API with the specified infrastructure providers
-func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec) error {
+func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 
 	logger.Info("Installing CAPI", "version", version, "mgmtProvider", mgmtProvider)
@@ -691,15 +730,15 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 
 	logger.Info("CAPI core installed successfully")
 
-	// Install infrastructure provider manually
-	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider); err != nil {
+	// Install infrastructure provider manually with credentials
+	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, creds); err != nil {
 		return fmt.Errorf("failed to install %s provider: %w", mgmtProvider, err)
 	}
 
 	// Install any additional providers
 	for _, p := range additionalProviders {
 		if p.Name != mgmtProvider {
-			if err := i.installInfraProvider(ctx, kubeconfigPath, p.Name); err != nil {
+			if err := i.installInfraProvider(ctx, kubeconfigPath, p.Name, creds); err != nil {
 				logger.Info("Failed to install additional provider", "provider", p.Name, "error", err)
 			}
 		}
@@ -725,8 +764,8 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	return nil
 }
 
-// installInfraProvider installs a CAPI infrastructure provider via kubectl apply
-func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string) error {
+// installInfraProvider installs a CAPI infrastructure provider
+func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 
 	var providerURL string
@@ -757,13 +796,97 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 		logger.Info("Failed to prepare provider namespace", "namespace", namespace, "error", err)
 	}
 
-	// Install via kubectl apply
-	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", providerURL); err != nil {
+	// Download manifest
+	resp, err := http.Get(providerURL)
+	if err != nil {
+		return fmt.Errorf("failed to download provider manifest: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download provider manifest: HTTP %d", resp.StatusCode)
+	}
+
+	manifestBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read provider manifest: %w", err)
+	}
+
+	// Substitute template variables with actual credentials
+	manifest := string(manifestBytes)
+	if provider == "nutanix" && creds != nil && creds.Nutanix != nil {
+		manifest = i.substituteNutanixCredentials(manifest, creds.Nutanix)
+	}
+
+	// Write processed manifest to temp file
+	tmpFile, err := os.CreateTemp("", "provider-*.yaml")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(manifest); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write manifest: %w", err)
+	}
+	tmpFile.Close()
+
+	// Apply manifest
+	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name()); err != nil {
 		return fmt.Errorf("failed to apply provider manifests: %w", err)
 	}
 
 	logger.Info("Infrastructure provider installed", "provider", provider)
 	return nil
+}
+
+// substituteNutanixCredentials replaces template variables with actual values
+func (i *Installer) substituteNutanixCredentials(manifest string, creds *NutanixCredentials) string {
+	port := creds.Port
+	if port == "" {
+		port = "9440"
+	}
+
+	insecure := "false"
+	if creds.Insecure {
+		insecure = "true"
+	}
+
+	// Build the full endpoint URL if not already a URL
+	endpoint := creds.Endpoint
+	if !strings.HasPrefix(endpoint, "https://") && !strings.HasPrefix(endpoint, "http://") {
+		endpoint = fmt.Sprintf("https://%s:%s", creds.Endpoint, port)
+	}
+
+	// Replace template variables (plain text)
+	replacements := map[string]string{
+		"${NUTANIX_ENDPOINT}": endpoint,
+		"${NUTANIX_USER}":     creds.Username,
+		"${NUTANIX_PASSWORD}": creds.Password,
+		"${NUTANIX_PORT}":     port,
+		"${NUTANIX_INSECURE}": insecure,
+	}
+
+	for placeholder, value := range replacements {
+		manifest = strings.ReplaceAll(manifest, placeholder, value)
+	}
+
+	// Handle base64 encoded values (some manifests expect base64 in Secrets)
+	credentialsJSON := fmt.Sprintf(`[{"type":"basic_auth","data":{"prismCentral":{"username":"%s","password":"%s"}}}]`,
+		creds.Username, creds.Password)
+
+	base64Replacements := map[string]string{
+		"${NUTANIX_ENDPOINT_B64}":    base64.StdEncoding.EncodeToString([]byte(endpoint)),
+		"${NUTANIX_USER_B64}":        base64.StdEncoding.EncodeToString([]byte(creds.Username)),
+		"${NUTANIX_PASSWORD_B64}":    base64.StdEncoding.EncodeToString([]byte(creds.Password)),
+		"${NUTANIX_CREDENTIALS_B64}": base64.StdEncoding.EncodeToString([]byte(credentialsJSON)),
+	}
+
+	for placeholder, value := range base64Replacements {
+		manifest = strings.ReplaceAll(manifest, placeholder, value)
+	}
+
+	return manifest
 }
 
 // waitForCAPIReady waits for CAPI controllers to be ready
