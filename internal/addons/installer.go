@@ -865,24 +865,16 @@ func (i *Installer) substituteNutanixCredentials(manifest string, creds *Nutanix
 		"${NUTANIX_PASSWORD}": creds.Password,
 		"${NUTANIX_PORT}":     port,
 		"${NUTANIX_INSECURE}": insecure,
+		// Variables with default values - use the defaults
+		"${NUTANIX_INSECURE=false}":             insecure,
+		"${NUTANIX_PORT=9440}":                  port,
+		"${NUTANIX_ADDITIONAL_TRUST_BUNDLE=''}": "",
+		"${NUTANIX_LOG_DEVELOPMENT=true}":       "true",
+		"${NUTANIX_LOG_LEVEL=info}":             "info",
+		"${NUTANIX_LOG_STACKTRACE_LEVEL=panic}": "panic",
 	}
 
 	for placeholder, value := range replacements {
-		manifest = strings.ReplaceAll(manifest, placeholder, value)
-	}
-
-	// Handle base64 encoded values (some manifests expect base64 in Secrets)
-	credentialsJSON := fmt.Sprintf(`[{"type":"basic_auth","data":{"prismCentral":{"username":"%s","password":"%s"}}}]`,
-		creds.Username, creds.Password)
-
-	base64Replacements := map[string]string{
-		"${NUTANIX_ENDPOINT_B64}":    base64.StdEncoding.EncodeToString([]byte(endpoint)),
-		"${NUTANIX_USER_B64}":        base64.StdEncoding.EncodeToString([]byte(creds.Username)),
-		"${NUTANIX_PASSWORD_B64}":    base64.StdEncoding.EncodeToString([]byte(creds.Password)),
-		"${NUTANIX_CREDENTIALS_B64}": base64.StdEncoding.EncodeToString([]byte(credentialsJSON)),
-	}
-
-	for placeholder, value := range base64Replacements {
 		manifest = strings.ReplaceAll(manifest, placeholder, value)
 	}
 
