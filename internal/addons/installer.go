@@ -795,6 +795,11 @@ func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig
 	}
 	defer cleanup()
 
+	// Ensure butler-system namespace exists
+	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "butler-system"); err != nil {
+		return fmt.Errorf("failed to create butler-system namespace: %w", err)
+	}
+
 	var secretManifest, providerConfigManifest string
 
 	switch providerType {
