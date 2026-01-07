@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
+	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
+
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -688,6 +690,91 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 	// For now, just ensure namespace exists
 	logger.Info("Butler namespace created - full installation pending")
 
+	return nil
+}
+
+// InstallButlerCRDs installs Butler platform CRDs on the target management cluster.
+// This must be called BEFORE InstallButlerController() to ensure the controller
+// can watch the CRD types it needs (TenantCluster, Team, etc.)
+func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Installing Butler platform CRDs")
+
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+	defer cleanup()
+
+	// Read all CRD files from embedded filesystem
+	entries, err := crds.PlatformCRDs.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("failed to read embedded CRDs: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Skip non-YAML files
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+
+		// Read CRD content
+		content, err := crds.PlatformCRDs.ReadFile(name)
+		if err != nil {
+			logger.Error(err, "Failed to read CRD file", "file", name)
+			continue
+		}
+
+		// Write to temp file
+		tmpFile, err := os.CreateTemp("", "butler-crd-*.yaml")
+		if err != nil {
+			return fmt.Errorf("failed to create temp file for CRD: %w", err)
+		}
+
+		if _, err := tmpFile.Write(content); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			return fmt.Errorf("failed to write CRD to temp file: %w", err)
+		}
+		tmpFile.Close()
+
+		// Apply CRD
+		if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name()); err != nil {
+			os.Remove(tmpFile.Name())
+			return fmt.Errorf("failed to apply CRD %s: %w", name, err)
+		}
+
+		os.Remove(tmpFile.Name())
+		logger.Info("Applied CRD", "file", name)
+	}
+
+	// Wait for CRDs to be established
+	logger.Info("Waiting for Butler CRDs to be established")
+	crdNames := []string{
+		"tenantclusters.butler.butlerlabs.dev",
+		"tenantaddons.butler.butlerlabs.dev",
+		"teams.butler.butlerlabs.dev",
+		"butlerconfigs.butler.butlerlabs.dev",
+	}
+
+	for _, crdName := range crdNames {
+		args := []string{
+			"wait", "--for=condition=Established",
+			"crd", crdName,
+			"--timeout=60s",
+		}
+		if err := i.runKubectl(ctx, kubeconfigPath, args...); err != nil {
+			// Log but don't fail - CRD might already exist and be established
+			logger.Info("CRD wait completed (may have already existed)", "crd", crdName)
+		}
+	}
+
+	logger.Info("Butler platform CRDs installed successfully")
 	return nil
 }
 

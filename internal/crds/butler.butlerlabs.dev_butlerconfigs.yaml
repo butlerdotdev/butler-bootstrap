@@ -1,0 +1,240 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: butlerconfigs.butler.butlerlabs.dev
+spec:
+  group: butler.butlerlabs.dev
+  names:
+    kind: ButlerConfig
+    listKind: ButlerConfigList
+    plural: butlerconfigs
+    shortNames:
+    - bc
+    singular: butlerconfig
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Multi-tenancy mode
+      jsonPath: .spec.multiTenancy.mode
+      name: Mode
+      type: string
+    - description: Number of teams
+      jsonPath: .status.teamCount
+      name: Teams
+      type: integer
+    - description: Number of clusters
+      jsonPath: .status.clusterCount
+      name: Clusters
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ButlerConfig is the Schema for the butlerconfigs API.
+          It is a singleton resource that configures platform-wide Butler settings.
+          Only one ButlerConfig named "butler" should exist in the cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ButlerConfigSpec defines the desired state of ButlerConfig.
+            properties:
+              defaultAddonVersions:
+                description: |-
+                  DefaultAddonVersions specifies the default versions for addons.
+                  Used when TenantCluster doesn't specify versions.
+                properties:
+                  certManager:
+                    description: CertManager version.
+                    type: string
+                  cilium:
+                    description: Cilium version.
+                    type: string
+                  fluxcd:
+                    description: FluxCD version.
+                    type: string
+                  longhorn:
+                    description: Longhorn version.
+                    type: string
+                  metallb:
+                    description: MetalLB version.
+                    type: string
+                  traefik:
+                    description: Traefik version.
+                    type: string
+                type: object
+              defaultNamespace:
+                default: butler-tenants
+                description: |-
+                  DefaultNamespace is the namespace for TenantClusters when not using Teams.
+                  Used in Disabled and Optional modes.
+                type: string
+              defaultProviderConfigRef:
+                description: |-
+                  DefaultProviderConfigRef references the default ProviderConfig.
+                  Used when Teams or TenantClusters don't specify their own.
+                properties:
+                  name:
+                    description: Name is the name of the resource.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              defaultTeamLimits:
+                description: |-
+                  DefaultTeamLimits are the default resource limits for new Teams.
+                  Admins can override these when creating individual Teams.
+                properties:
+                  maxClusters:
+                    description: MaxClusters is the maximum number of TenantClusters
+                      a Team can create.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxTotalCPU:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxTotalCPU is the maximum total CPU cores across
+                      all clusters.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxTotalMemory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxTotalMemory is the maximum total memory across
+                      all clusters.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxTotalStorage:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxTotalStorage is the maximum total storage across
+                      all clusters.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  maxWorkersPerCluster:
+                    description: MaxWorkersPerCluster is the maximum workers per TenantCluster.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+              multiTenancy:
+                description: MultiTenancy configures how multi-tenancy is handled.
+                properties:
+                  mode:
+                    default: Disabled
+                    description: Mode determines how multi-tenancy is enforced.
+                    enum:
+                    - Enforced
+                    - Optional
+                    - Disabled
+                    type: string
+                type: object
+            type: object
+          status:
+            description: ButlerConfigStatus defines the observed state of ButlerConfig.
+            properties:
+              clusterCount:
+                description: ClusterCount is the current number of TenantClusters.
+                format: int32
+                type: integer
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the config's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the last observed generation.
+                format: int64
+                type: integer
+              teamCount:
+                description: TeamCount is the current number of Teams.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

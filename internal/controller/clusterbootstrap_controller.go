@@ -100,6 +100,7 @@ type AddonInstallerInterface interface {
 	InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
+	InstallButlerCRDs(ctx context.Context, kubeconfig []byte) error // ADD
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 }
@@ -849,6 +850,24 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Flux installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
 				logger.Info("Failed to update status after Flux install", "error", err)
+			}
+		}
+	}
+
+	// 9.5. Butler CRDs
+	if addons.IsButlerControllerEnabled() {
+		if !r.isAddonInstalled(cb, "butler-crds") {
+			logger.Info("Installing Butler CRDs")
+
+			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig); err != nil {
+				logger.Error(err, "Failed to install Butler CRDs")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+
+			r.setAddonInstalled(cb, "butler-crds")
+			logger.Info("Butler CRDs installed successfully")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Info("Failed to update status after Butler CRDs install", "error", err)
 			}
 		}
 	}
