@@ -15,6 +15,7 @@ package addons
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,16 +47,23 @@ type ProviderCredentials struct {
 
 // NutanixCredentials holds Nutanix Prism Central credentials
 type NutanixCredentials struct {
-	Endpoint string
-	Username string
-	Password string
-	Port     string
-	Insecure bool
+	Endpoint    string
+	Username    string
+	Password    string
+	Port        string
+	Insecure    bool
+	ClusterUUID string
+	SubnetUUID  string
+	ImageUUID   string // optional
 }
 
 // HarvesterCredentials holds Harvester credentials
 type HarvesterCredentials struct {
-	// Harvester uses kubeconfig, no additional creds needed for CAPK
+	Kubeconfig       []byte // optional - if connecting to external Harvester
+	Namespace        string
+	NetworkName      string
+	ImageName        string // optional
+	StorageClassName string // optional
 }
 
 // VSphereCredentials holds vSphere credentials
@@ -750,6 +758,7 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte) er
 		"tenantaddons.butler.butlerlabs.dev",
 		"teams.butler.butlerlabs.dev",
 		"butlerconfigs.butler.butlerlabs.dev",
+		"providerconfigs.butler.butlerlabs.dev",
 	}
 	for _, crdName := range crdNames {
 		args := []string{
@@ -772,6 +781,254 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte) er
 
 	logger.Info("Butler platform CRDs installed successfully")
 	return nil
+}
+
+// InstallInitialProviderConfig creates the initial ProviderConfig CR and credentials secret
+// on the management cluster based on the provider used during bootstrap.
+func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Creating initial ProviderConfig", "provider", providerType)
+
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+	defer cleanup()
+
+	var secretManifest, providerConfigManifest string
+
+	switch providerType {
+	case "nutanix":
+		if creds == nil || creds.Nutanix == nil {
+			return fmt.Errorf("nutanix credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateNutanixProviderConfig(creds.Nutanix)
+	case "harvester":
+		if creds == nil || creds.Harvester == nil {
+			return fmt.Errorf("harvester credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateHarvesterProviderConfig(creds.Harvester)
+	default:
+		logger.Info("Provider type not yet supported for ProviderConfig creation, skipping", "provider", providerType)
+		return nil
+	}
+
+	// Apply secret first (if any)
+	if secretManifest != "" {
+		tmpFile, err := os.CreateTemp("", "provider-secret-*.yaml")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(tmpFile.Name())
+
+		if _, err := tmpFile.WriteString(secretManifest); err != nil {
+			return err
+		}
+		tmpFile.Close()
+
+		if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name()); err != nil {
+			return fmt.Errorf("failed to apply provider credentials secret: %w", err)
+		}
+		logger.Info("Created provider credentials secret")
+	}
+
+	// Apply ProviderConfig
+	tmpFile, err := os.CreateTemp("", "providerconfig-*.yaml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(providerConfigManifest); err != nil {
+		return err
+	}
+	tmpFile.Close()
+
+	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name()); err != nil {
+		return fmt.Errorf("failed to apply ProviderConfig: %w", err)
+	}
+
+	logger.Info("Initial ProviderConfig created successfully", "provider", providerType)
+	return nil
+}
+
+func (i *Installer) generateNutanixProviderConfig(creds *NutanixCredentials) (string, string) {
+	port := creds.Port
+	if port == "" {
+		port = "9440"
+	}
+
+	endpoint := creds.Endpoint
+	if !strings.HasPrefix(endpoint, "https://") && !strings.HasPrefix(endpoint, "http://") {
+		endpoint = fmt.Sprintf("https://%s:%s", creds.Endpoint, port)
+	}
+
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: nutanix-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  username: "%s"
+  password: "%s"
+`, creds.Username, creds.Password)
+
+	// Build nutanix config section
+	nutanixConfig := fmt.Sprintf(`    endpoint: "%s"
+    port: %s
+    insecure: %t
+    clusterUUID: "%s"
+    subnetUUID: "%s"`, endpoint, port, creds.Insecure, creds.ClusterUUID, creds.SubnetUUID)
+
+	// Add optional imageUUID if provided
+	if creds.ImageUUID != "" {
+		nutanixConfig += fmt.Sprintf(`
+    imageUUID: "%s"`, creds.ImageUUID)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: nutanix
+  namespace: butler-system
+spec:
+  provider: nutanix
+  credentialsRef:
+    name: nutanix-credentials
+    namespace: butler-system
+  nutanix:
+%s
+`, nutanixConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
+func (i *Installer) generateHarvesterProviderConfig(creds *HarvesterCredentials) (string, string) {
+	namespace := creds.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	var secretManifest string
+
+	// Always create the secret for consistency
+	if len(creds.Kubeconfig) > 0 {
+		// External kubeconfig provided - base64 encode for data field
+		secretManifest = fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: harvester-kubeconfig
+  namespace: butler-system
+type: Opaque
+data:
+  kubeconfig: %s
+`, base64.StdEncoding.EncodeToString(creds.Kubeconfig))
+	} else {
+		// No external kubeconfig - create placeholder for in-cluster usage
+		// The provider will detect empty kubeconfig and use in-cluster config
+		secretManifest = `apiVersion: v1
+kind: Secret
+metadata:
+  name: harvester-kubeconfig
+  namespace: butler-system
+  annotations:
+    butler.butlerlabs.dev/note: "Empty kubeconfig - provider will use in-cluster config"
+type: Opaque
+stringData:
+  kubeconfig: ""
+`
+	}
+
+	// Build harvester config section
+	harvesterConfig := fmt.Sprintf(`    namespace: "%s"
+    networkName: "%s"`, namespace, creds.NetworkName)
+
+	// Add optional fields if provided
+	if creds.ImageName != "" {
+		harvesterConfig += fmt.Sprintf(`
+    imageName: "%s"`, creds.ImageName)
+	}
+	if creds.StorageClassName != "" {
+		harvesterConfig += fmt.Sprintf(`
+    storageClassName: "%s"`, creds.StorageClassName)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: harvester
+  namespace: butler-system
+spec:
+  provider: harvester
+  credentialsRef:
+    name: harvester-kubeconfig
+    namespace: butler-system
+  harvester:
+%s
+`, harvesterConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
+func (i *Installer) generateVSphereProviderConfig(creds *VSphereCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: vsphere-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  VSPHERE_SERVER: "%s"
+  VSPHERE_USER: "%s"
+  VSPHERE_PASSWORD: "%s"
+`, creds.Server, creds.Username, creds.Password)
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: vsphere
+  namespace: butler-system
+spec:
+  type: vsphere
+  vsphere:
+    server: "%s"
+    credentialsRef:
+      name: vsphere-credentials
+      namespace: butler-system
+`, creds.Server)
+
+	return secretManifest, providerConfigManifest
+}
+
+func (i *Installer) generateProxmoxProviderConfig(creds *ProxmoxCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: proxmox-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  PROXMOX_URL: "%s"
+  PROXMOX_USER: "%s"
+  PROXMOX_PASSWORD: "%s"
+`, creds.Endpoint, creds.Username, creds.Password)
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: proxmox
+  namespace: butler-system
+spec:
+  type: proxmox
+  proxmox:
+    endpoint: "%s"
+    credentialsRef:
+      name: proxmox-credentials
+      namespace: butler-system
+`, creds.Endpoint)
+
+	return secretManifest, providerConfigManifest
 }
 
 // InstallCAPI installs Cluster API with the specified infrastructure providers
@@ -1058,6 +1315,7 @@ func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []by
 }
 
 // generateButlerControllerManifest generates the deployment manifest
+// generateButlerControllerManifest generates the deployment manifest
 func (i *Installer) generateButlerControllerManifest(image string) string {
 	return fmt.Sprintf(`---
 apiVersion: v1
@@ -1092,6 +1350,9 @@ rules:
 - apiGroups: [""]
   resources: ["secrets", "configmaps", "namespaces", "services", "events"]
   verbs: ["*"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  verbs: ["*"]
 - apiGroups: ["helm.toolkit.fluxcd.io"]
   resources: ["helmreleases"]
   verbs: ["*"]
@@ -1107,6 +1368,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: butler-controller-role
+subjects:
+- kind: ServiceAccount
+  name: butler-controller
+  namespace: butler-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: butler-controller-leader-election
+  namespace: butler-system
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: butler-controller-leader-election
+  namespace: butler-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: butler-controller-leader-election
 subjects:
 - kind: ServiceAccount
   name: butler-controller

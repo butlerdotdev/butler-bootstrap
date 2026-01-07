@@ -21,6 +21,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -100,7 +102,8 @@ type AddonInstallerInterface interface {
 	InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
-	InstallButlerCRDs(ctx context.Context, kubeconfig []byte) error // ADD
+	InstallButlerCRDs(ctx context.Context, kubeconfig []byte) error
+	InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *addons.ProviderCredentials) error
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 }
@@ -871,6 +874,21 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			}
 		}
 	}
+	// 9.6. Initial ProviderConfig - copies provider config from KIND to mgmt cluster
+	if !r.isAddonInstalled(cb, "provider-config") {
+		providerType := cb.Spec.Provider
+		creds, err := r.extractProviderCredentials(ctx, cb)
+		if err != nil {
+			logger.Error(err, "Failed to extract provider credentials")
+			return ctrl.Result{RequeueAfter: requeueShort}, nil
+		}
+
+		if err := r.AddonInstaller.InstallInitialProviderConfig(ctx, kubeconfig, providerType, creds); err != nil {
+			logger.Error(err, "Failed to create initial ProviderConfig")
+			return ctrl.Result{RequeueAfter: requeueShort}, nil
+		}
+		r.setAddonInstalled(cb, "provider-config")
+	}
 
 	// 10. Butler Controller
 	if addons.IsButlerControllerEnabled() {
@@ -1117,6 +1135,85 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 			Username: string(secret.Data["username"]),
 			Password: string(secret.Data["password"]),
 		}
+	}
+
+	return creds, nil
+}
+
+// extractProviderCredentials fetches credentials from the referenced ProviderConfig
+func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (*addons.ProviderCredentials, error) {
+	logger := log.FromContext(ctx)
+	creds := &addons.ProviderCredentials{}
+
+	// Get the ProviderConfig from the local (KIND) cluster
+	providerConfig := &butlerv1alpha1.ProviderConfig{}
+	providerConfigKey := types.NamespacedName{
+		Name:      cb.Spec.ProviderRef.Name,
+		Namespace: cb.Spec.ProviderRef.Namespace,
+	}
+	if providerConfigKey.Namespace == "" {
+		providerConfigKey.Namespace = cb.Namespace
+	}
+
+	if err := r.Get(ctx, providerConfigKey, providerConfig); err != nil {
+		return nil, fmt.Errorf("failed to get ProviderConfig %s: %w", providerConfigKey, err)
+	}
+
+	// Get the credentials secret
+	secretKey := types.NamespacedName{
+		Name:      providerConfig.Spec.CredentialsRef.Name,
+		Namespace: providerConfig.Spec.CredentialsRef.Namespace,
+	}
+	if secretKey.Namespace == "" {
+		secretKey.Namespace = providerConfig.Namespace
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		return nil, fmt.Errorf("failed to get credentials secret %s: %w", secretKey, err)
+	}
+
+	switch cb.Spec.Provider {
+	case "nutanix":
+		if providerConfig.Spec.Nutanix == nil {
+			return nil, fmt.Errorf("ProviderConfig %s has no nutanix configuration", providerConfigKey)
+		}
+		port := providerConfig.Spec.Nutanix.Port
+		if port == 0 {
+			port = 9440
+		}
+		creds.Nutanix = &addons.NutanixCredentials{
+			Endpoint:    providerConfig.Spec.Nutanix.Endpoint,
+			Username:    string(secret.Data["username"]),
+			Password:    string(secret.Data["password"]),
+			Port:        fmt.Sprintf("%d", port),
+			Insecure:    providerConfig.Spec.Nutanix.Insecure,
+			ClusterUUID: providerConfig.Spec.Nutanix.ClusterUUID,
+			SubnetUUID:  providerConfig.Spec.Nutanix.SubnetUUID,
+			ImageUUID:   providerConfig.Spec.Nutanix.ImageUUID,
+		}
+		logger.Info("Extracted Nutanix credentials",
+			"endpoint", creds.Nutanix.Endpoint,
+			"clusterUUID", creds.Nutanix.ClusterUUID,
+			"subnetUUID", creds.Nutanix.SubnetUUID)
+
+	case "harvester":
+		if providerConfig.Spec.Harvester == nil {
+			return nil, fmt.Errorf("ProviderConfig %s has no harvester configuration", providerConfigKey)
+		}
+		creds.Harvester = &addons.HarvesterCredentials{
+			Kubeconfig:       secret.Data["kubeconfig"],
+			Namespace:        providerConfig.Spec.Harvester.Namespace,
+			NetworkName:      providerConfig.Spec.Harvester.NetworkName,
+			ImageName:        providerConfig.Spec.Harvester.ImageName,
+			StorageClassName: providerConfig.Spec.Harvester.StorageClassName,
+		}
+		logger.Info("Extracted Harvester credentials",
+			"namespace", creds.Harvester.Namespace,
+			"networkName", creds.Harvester.NetworkName)
+
+	default:
+		logger.Info("Unknown or unsupported provider type", "provider", cb.Spec.Provider)
 	}
 
 	return creds, nil
