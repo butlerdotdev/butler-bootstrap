@@ -106,6 +106,7 @@ type AddonInstallerInterface interface {
 	InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *addons.ProviderCredentials) error
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
+	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error)
 }
 
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=clusterbootstraps,verbs=get;list;watch;create;update;patch;delete
@@ -924,6 +925,28 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		logger.Info("Butler installed successfully")
 		if err := r.Status().Update(ctx, cb); err != nil {
 			logger.Info("Failed to update status after Butler install", "error", err)
+		}
+	}
+
+	// 12. Butler Console
+	if addons.IsConsoleEnabled() {
+		if !r.isAddonInstalled(cb, "butler-console") {
+			logger.Info("Installing Butler Console")
+
+			consoleURL, err := r.AddonInstaller.InstallConsole(ctx, kubeconfig, addons.Console, cb.Spec.Cluster.Name)
+			if err != nil {
+				logger.Error(err, "Failed to install Butler Console")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+
+			// Store console URL in status for orchestrator to retrieve
+			cb.Status.ConsoleURL = consoleURL
+
+			r.setAddonInstalled(cb, "butler-console")
+			logger.Info("Butler Console installed successfully", "url", consoleURL)
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Info("Failed to update status after Console install", "error", err)
+			}
 		}
 	}
 
