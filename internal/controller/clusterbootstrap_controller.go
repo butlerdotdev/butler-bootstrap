@@ -102,7 +102,7 @@ type AddonInstallerInterface interface {
 	InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
-	InstallButlerCRDs(ctx context.Context, kubeconfig []byte) error
+	InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error
 	InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *addons.ProviderCredentials) error
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
