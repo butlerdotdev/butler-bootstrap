@@ -64,15 +64,16 @@ type TalosClientInterface interface {
 
 // TalosConfigOptions defines options for generating Talos configs
 type TalosConfigOptions struct {
-	ClusterName     string
-	ControlPlaneVIP string
-	ControlPlaneIPs []string
-	WorkerIPs       []string
-	PodCIDR         string
-	ServiceCIDR     string
-	TalosVersion    string
-	InstallDisk     string
-	ConfigPatches   []ConfigPatch
+	ClusterName                    string
+	ControlPlaneVIP                string
+	ControlPlaneIPs                []string
+	WorkerIPs                      []string
+	PodCIDR                        string
+	ServiceCIDR                    string
+	TalosVersion                   string
+	InstallDisk                    string
+	ConfigPatches                  []ConfigPatch
+	AllowSchedulingOnControlPlanes bool // For single-node topology
 }
 
 // ConfigPatch mirrors the CRD type
@@ -272,12 +273,21 @@ func (r *ClusterBootstrapReconciler) reconcilePending(ctx context.Context, cb *b
 
 func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Reconciling ProvisioningMachines phase")
+
+	// Log topology information
+	isSingleNode := cb.IsSingleNode()
+	expectedCount := cb.GetExpectedMachineCount()
+	logger.Info("Reconciling ProvisioningMachines phase",
+		"topology", cb.Spec.Cluster.Topology,
+		"singleNode", isSingleNode,
+		"expectedMachines", expectedCount)
 
 	clusterName := cb.Spec.Cluster.Name
 
 	// Create control plane MachineRequests
-	for i := int32(0); i < cb.Spec.Cluster.ControlPlane.Replicas; i++ {
+	// Use GetControlPlaneReplicas() which returns 1 for single-node
+	cpReplicas := cb.GetControlPlaneReplicas()
+	for i := int32(0); i < cpReplicas; i++ {
 		mrName := fmt.Sprintf("%s-cp-%d", clusterName, i)
 		if err := r.ensureMachineRequest(ctx, cb, mrName, "control-plane", cb.Spec.Cluster.ControlPlane); err != nil {
 			logger.Error(err, "Failed to ensure control plane MachineRequest", "name", mrName)
@@ -285,8 +295,8 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 		}
 	}
 
-	// Create worker MachineRequests if specified
-	if cb.Spec.Cluster.Workers != nil {
+	// Create worker MachineRequests only if NOT single-node topology
+	if !isSingleNode && cb.Spec.Cluster.Workers != nil {
 		for i := int32(0); i < cb.Spec.Cluster.Workers.Replicas; i++ {
 			mrName := fmt.Sprintf("%s-worker-%d", clusterName, i)
 			if err := r.ensureMachineRequest(ctx, cb, mrName, "worker", *cb.Spec.Cluster.Workers); err != nil {
@@ -294,6 +304,8 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 				return ctrl.Result{}, err
 			}
 		}
+	} else if isSingleNode {
+		logger.Info("Single-node topology: skipping worker MachineRequest creation")
 	}
 
 	// Update machine statuses
@@ -302,9 +314,10 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 		return ctrl.Result{}, err
 	}
 
-	// Check if all machines are ready
-	if r.allMachinesRunning(cb) {
-		logger.Info("All machines are running, transitioning to ConfiguringTalos")
+	// Check if all machines are ready using the CRD helper method
+	if cb.AllMachinesRunning() {
+		logger.Info("All machines are running, transitioning to ConfiguringTalos",
+			"machineCount", len(cb.Status.Machines))
 		cb.Status.Phase = butlerv1alpha1.ClusterBootstrapPhaseConfiguringTalos
 		cb.Status.LastUpdated = metav1.Now()
 		if err := r.Status().Update(ctx, cb); err != nil {
@@ -322,7 +335,9 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 		}
 	}
 
-	logger.Info("Waiting for machines to be ready", "count", len(cb.Status.Machines))
+	logger.Info("Waiting for machines to be ready",
+		"current", len(cb.Status.Machines),
+		"expected", expectedCount)
 	return ctrl.Result{RequeueAfter: requeueMedium}, nil
 }
 
@@ -417,7 +432,9 @@ func (r *ClusterBootstrapReconciler) updateMachineStatuses(ctx context.Context, 
 
 func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Reconciling ConfiguringTalos phase")
+	logger.Info("Reconciling ConfiguringTalos phase",
+		"topology", cb.Spec.Cluster.Topology,
+		"singleNode", cb.IsSingleNode())
 
 	// Check if we need to generate configs
 	if cb.Status.TalosConfig == "" {
@@ -425,14 +442,19 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 		workerIPs := r.getWorkerIPs(cb)
 
 		opts := TalosConfigOptions{
-			ClusterName:     cb.Spec.Cluster.Name,
-			ControlPlaneVIP: cb.Spec.Network.VIP,
-			ControlPlaneIPs: cpIPs,
-			WorkerIPs:       workerIPs,
-			PodCIDR:         cb.Spec.Network.PodCIDR,
-			ServiceCIDR:     cb.Spec.Network.ServiceCIDR,
-			TalosVersion:    cb.Spec.Talos.Version,
-			InstallDisk:     cb.Spec.Talos.InstallDisk,
+			ClusterName:                    cb.Spec.Cluster.Name,
+			ControlPlaneVIP:                cb.Spec.Network.VIP,
+			ControlPlaneIPs:                cpIPs,
+			WorkerIPs:                      workerIPs,
+			PodCIDR:                        cb.Spec.Network.PodCIDR,
+			ServiceCIDR:                    cb.Spec.Network.ServiceCIDR,
+			TalosVersion:                   cb.Spec.Talos.Version,
+			InstallDisk:                    cb.Spec.Talos.InstallDisk,
+			AllowSchedulingOnControlPlanes: cb.IsSingleNode(), // Enable for single-node
+		}
+
+		if cb.IsSingleNode() {
+			logger.Info("Single-node mode: enabling workload scheduling on control planes")
 		}
 
 		// Convert config patches
@@ -721,15 +743,19 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 4. Longhorn storage
+	// 4. Longhorn storage - use topology-aware replica count
 	if addons.Storage != nil && addons.Storage.Type == "longhorn" {
 		if !r.isAddonInstalled(cb, "longhorn") {
 			logger.Info("Installing Longhorn")
 			version := addons.Storage.Version
-			replicas := addons.Storage.DefaultReplicaCount
-			if replicas == 0 {
-				replicas = 2
-			}
+
+			// Use GetStorageReplicaCount() for topology-aware replica count
+			// Returns 1 for single-node, 3 for HA (default)
+			replicas := cb.GetStorageReplicaCount()
+
+			logger.Info("Installing Longhorn with replica count",
+				"replicas", replicas,
+				"singleNode", cb.IsSingleNode())
 
 			if err := r.AddonInstaller.InstallLonghorn(ctx, kubeconfig, version, replicas); err != nil {
 				logger.Error(err, "Failed to install Longhorn")
@@ -737,7 +763,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			}
 
 			r.setAddonInstalled(cb, "longhorn")
-			logger.Info("Longhorn installed successfully")
+			logger.Info("Longhorn installed successfully", "replicaCount", replicas)
 			if err := r.Status().Update(ctx, cb); err != nil {
 				logger.Info("Failed to update status after Longhorn install", "error", err)
 			}
@@ -1054,25 +1080,6 @@ func (r *ClusterBootstrapReconciler) setFailure(cb *butlerv1alpha1.ClusterBootst
 	cb.Status.FailureReason = reason
 	cb.Status.FailureMessage = message
 	cb.Status.LastUpdated = metav1.Now()
-}
-
-func (r *ClusterBootstrapReconciler) allMachinesRunning(cb *butlerv1alpha1.ClusterBootstrap) bool {
-	expectedCount := int(cb.Spec.Cluster.ControlPlane.Replicas)
-	if cb.Spec.Cluster.Workers != nil {
-		expectedCount += int(cb.Spec.Cluster.Workers.Replicas)
-	}
-
-	if len(cb.Status.Machines) != expectedCount {
-		return false
-	}
-
-	for _, m := range cb.Status.Machines {
-		if m.Phase != string(butlerv1alpha1.MachinePhaseRunning) || m.IPAddress == "" {
-			return false
-		}
-	}
-
-	return true
 }
 
 func (r *ClusterBootstrapReconciler) getControlPlaneIPs(cb *butlerv1alpha1.ClusterBootstrap) []string {

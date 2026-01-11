@@ -96,6 +96,13 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 	// Disable kube-proxy (Cilium handles this)
 	args = append(args, "--config-patch", `[{"op": "add", "path": "/cluster/proxy", "value": {"disabled": true}}]`)
 
+	// Allow scheduling on control planes for single-node clusters
+	// This enables workloads to run on the single control plane node
+	if opts.AllowSchedulingOnControlPlanes {
+		logger.Info("Enabling workload scheduling on control planes (single-node mode)")
+		args = append(args, "--config-patch", `[{"op": "add", "path": "/cluster/allowSchedulingOnControlPlanes", "value": true}]`)
+	}
+
 	// Add custom patches
 	for _, patch := range opts.ConfigPatches {
 		patchJSON := fmt.Sprintf(`[{"op": "%s", "path": "%s"`, patch.Op, patch.Path)
@@ -106,7 +113,9 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 		args = append(args, "--config-patch", patchJSON)
 	}
 
-	logger.Info("Running talosctl gen config", "cluster", opts.ClusterName)
+	logger.Info("Running talosctl gen config",
+		"cluster", opts.ClusterName,
+		"singleNode", opts.AllowSchedulingOnControlPlanes)
 
 	cmd := exec.CommandContext(ctx, c.TalosctlPath, args...)
 	cmd.Dir = c.WorkDir
