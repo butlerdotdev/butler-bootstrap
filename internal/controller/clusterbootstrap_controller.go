@@ -863,7 +863,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		if !r.isAddonInstalled(cb, "butler-crds") {
 			logger.Info("Installing Butler CRDs")
 
-			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig); err != nil {
+			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig, "0.1.0"); err != nil {
 				logger.Error(err, "Failed to install Butler CRDs")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
