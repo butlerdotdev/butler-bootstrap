@@ -1,0 +1,212 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: addondefinitions.butler.butlerlabs.dev
+spec:
+  group: butler.butlerlabs.dev
+  names:
+    kind: AddonDefinition
+    listKind: AddonDefinitionList
+    plural: addondefinitions
+    shortNames:
+    - ad
+    - adddef
+    singular: addondefinition
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Human-readable name
+      jsonPath: .spec.displayName
+      name: Display Name
+      type: string
+    - description: Addon category
+      jsonPath: .spec.category
+      name: Category
+      type: string
+    - description: Helm chart name
+      jsonPath: .spec.chart.name
+      name: Chart
+      type: string
+    - description: Default version
+      jsonPath: .spec.chart.defaultVersion
+      name: Version
+      type: string
+    - description: Is platform addon
+      jsonPath: .spec.platform
+      name: Platform
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AddonDefinition defines an addon available for installation in tenant clusters.
+          AddonDefinitions are cluster-scoped resources that describe Helm charts
+          that can be installed via TenantAddon resources.
+
+          Butler ships with built-in AddonDefinitions for common CNCF tools.
+          Organizations can add custom AddonDefinitions for internal charts.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AddonDefinitionSpec defines the desired state of AddonDefinition.
+              An AddonDefinition is a cluster-scoped resource that defines an addon
+              available for installation in tenant clusters.
+            properties:
+              category:
+                description: Category groups addons in the UI for easier discovery.
+                enum:
+                - cni
+                - loadbalancer
+                - storage
+                - certmanager
+                - ingress
+                - observability
+                - backup
+                - gitops
+                - security
+                - other
+                type: string
+              chart:
+                description: Chart specifies the Helm chart to install.
+                properties:
+                  availableVersions:
+                    description: |-
+                      AvailableVersions lists other versions known to work with Butler.
+                      Used for version dropdown in UI. If empty, only defaultVersion shown.
+                    items:
+                      type: string
+                    type: array
+                  defaultVersion:
+                    description: |-
+                      DefaultVersion is the chart version used when TenantAddon
+                      doesn't specify a version. Should be a stable, tested version.
+                    type: string
+                  name:
+                    description: Name is the chart name within the repository.
+                    minLength: 1
+                    type: string
+                  repository:
+                    description: Repository is the Helm repository URL.
+                    pattern: ^https?://
+                    type: string
+                required:
+                - defaultVersion
+                - name
+                - repository
+                type: object
+              defaults:
+                description: |-
+                  Defaults provides installation defaults.
+                  These can be overridden in TenantAddon.
+                properties:
+                  createNamespace:
+                    default: true
+                    description: CreateNamespace indicates whether to create the namespace.
+                    type: boolean
+                  namespace:
+                    description: |-
+                      Namespace is the target namespace for installation.
+                      If not specified, defaults to the addon name.
+                    type: string
+                  releaseName:
+                    description: |-
+                      ReleaseName is the Helm release name.
+                      If not specified, defaults to the addon name.
+                    type: string
+                  timeout:
+                    default: 10m
+                    description: Timeout for Helm operations.
+                    type: string
+                  values:
+                    description: |-
+                      Values are default Helm values applied during installation.
+                      These can be overridden in TenantAddon.spec.values.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
+              dependsOn:
+                description: |-
+                  DependsOn lists addon names that must be installed first.
+                  The TenantAddon controller will wait for these dependencies
+                  to be in Installed phase before proceeding.
+                items:
+                  type: string
+                type: array
+              description:
+                description: Description explains what this addon provides.
+                maxLength: 512
+                minLength: 1
+                type: string
+              displayName:
+                description: DisplayName is the human-readable name shown in the Butler
+                  UI.
+                maxLength: 64
+                minLength: 1
+                type: string
+              icon:
+                description: Icon is an emoji or icon identifier for UI display.
+                maxLength: 8
+                type: string
+              links:
+                description: Links provides URLs for documentation, source, etc.
+                properties:
+                  documentation:
+                    description: Documentation URL.
+                    type: string
+                  homepage:
+                    description: Project homepage URL.
+                    type: string
+                  source:
+                    description: Source code URL.
+                    type: string
+                type: object
+              maintainer:
+                description: Maintainer identifies who maintains this addon definition.
+                properties:
+                  email:
+                    description: Email of the maintainer.
+                    type: string
+                  name:
+                    description: Name of the maintainer.
+                    type: string
+                type: object
+              platform:
+                default: false
+                description: |-
+                  Platform marks this as a core platform addon.
+                  Platform addons are installed during cluster bootstrap and cannot
+                  be uninstalled via the UI. They appear in a separate section.
+                type: boolean
+            required:
+            - category
+            - chart
+            - description
+            - displayName
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}
