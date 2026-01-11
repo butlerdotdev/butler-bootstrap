@@ -1441,9 +1441,15 @@ spec:
 
 // InstallConsole installs butler-console (server + frontend) on the management cluster
 // Returns the console URL for user output
-func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, cfg ConsoleConfig, clusterName string) (string, error) {
+func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Installing butler-console", "version", cfg.Version)
+
+	version := "0.1.0"
+	if spec != nil && spec.Version != "" {
+		version = spec.Version
+	}
+
+	logger.Info("Installing butler-console", "version", version)
 
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -1451,38 +1457,25 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, cfg C
 	}
 	defer cleanup()
 
-	// butler-system namespace should already exist from butler-controller
-	// but ensure it's there and privileged
 	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "butler-system"); err != nil {
 		return "", fmt.Errorf("failed to prepare butler-system namespace: %w", err)
 	}
 
-	// Add butler-charts helm repo
-	if err := i.runHelm(ctx, kubeconfigPath, "repo", "add", "butler", "https://butlerdotdev.github.io/butler-charts"); err != nil {
-		// Ignore error if repo already exists
-		logger.Info("Helm repo add returned error (may already exist)", "error", err)
-	}
-	if err := i.runHelm(ctx, kubeconfigPath, "repo", "update"); err != nil {
-		logger.Info("Helm repo update warning", "error", err)
-	}
-
-	// Determine image tag
-	imageTag := cfg.Version
-	if imageTag == "" {
-		imageTag = "latest"
-	}
-
 	// Build helm values
 	values := []string{
-		"server.image.tag=" + imageTag,
-		"frontend.image.tag=" + imageTag,
+		"server.image.tag=latest",
+		"frontend.image.tag=latest",
 	}
 
 	// Configure ingress if enabled
-	if cfg.Ingress.Enabled {
+	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {
+		host := spec.Ingress.Host
+		if host == "" {
+			host = fmt.Sprintf("butler.%s.local", clusterName)
+		}
 		values = append(values,
 			"ingress.enabled=true",
-			"ingress.hosts[0].host="+cfg.Ingress.Host,
+			"ingress.hosts[0].host="+host,
 			"ingress.hosts[0].paths[0].path=/api",
 			"ingress.hosts[0].paths[0].pathType=Prefix",
 			"ingress.hosts[0].paths[0].service=server",
@@ -1493,26 +1486,27 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, cfg C
 			"ingress.hosts[0].paths[2].pathType=Prefix",
 			"ingress.hosts[0].paths[2].service=frontend",
 		)
-		if cfg.Ingress.ClassName != "" {
-			values = append(values, "ingress.className="+cfg.Ingress.ClassName)
+		if spec.Ingress.ClassName != "" {
+			values = append(values, "ingress.className="+spec.Ingress.ClassName)
 		}
-		if cfg.Ingress.TLS {
-			secretName := cfg.Ingress.TLSSecretName
+		if spec.Ingress.TLS {
+			secretName := spec.Ingress.TLSSecretName
 			if secretName == "" {
 				secretName = "butler-console-tls"
 			}
 			values = append(values,
 				"ingress.tls[0].secretName="+secretName,
-				"ingress.tls[0].hosts[0]="+cfg.Ingress.Host,
+				"ingress.tls[0].hosts[0]="+host,
 			)
 		}
 	}
 
-	// Build helm install args
+	// Build helm install args - USE OCI REGISTRY
 	args := []string{
 		"upgrade", "--install",
 		"butler-console",
-		"butler/butler-console",
+		"oci://ghcr.io/butlerdotdev/charts/butler-console",
+		"--version", version,
 		"-n", "butler-system",
 		"--wait",
 		"--timeout", "5m",
@@ -1527,14 +1521,13 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, cfg C
 		return "", fmt.Errorf("failed to install butler-console: %w", err)
 	}
 
-	// Wait for server deployment
+	// Wait for deployments
 	if err := i.runKubectl(ctx, kubeconfigPath,
 		"rollout", "status", "deployment", "butler-console-server",
 		"-n", "butler-system", "--timeout=3m"); err != nil {
 		return "", fmt.Errorf("butler-console-server not ready: %w", err)
 	}
 
-	// Wait for frontend deployment
 	if err := i.runKubectl(ctx, kubeconfigPath,
 		"rollout", "status", "deployment", "butler-console-frontend",
 		"-n", "butler-system", "--timeout=3m"); err != nil {
@@ -1543,9 +1536,36 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, cfg C
 
 	logger.Info("butler-console installed successfully")
 
-	// Determine console URL
-	consoleURL := i.getConsoleURL(ctx, kubeconfigPath, cfg)
-	return consoleURL, nil
+	// Determine URL
+	return i.getConsoleURLFromSpec(ctx, kubeconfigPath, spec, clusterName), nil
+}
+
+func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath string, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) string {
+	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {
+		host := spec.Ingress.Host
+		if host == "" {
+			host = fmt.Sprintf("butler.%s.local", clusterName)
+		}
+		scheme := "http"
+		if spec.Ingress.TLS {
+			scheme = "https"
+		}
+		return fmt.Sprintf("%s://%s", scheme, host)
+	}
+
+	// Try LoadBalancer IP
+	cmd := exec.CommandContext(ctx, i.KubectlPath,
+		"--kubeconfig", kubeconfigPath,
+		"--insecure-skip-tls-verify",
+		"get", "svc", "butler-console-frontend",
+		"-n", "butler-system",
+		"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
+	)
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		return fmt.Sprintf("http://%s", string(output))
+	}
+
+	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
 }
 
 // getConsoleURL determines the URL to access the console
