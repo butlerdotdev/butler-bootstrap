@@ -106,6 +106,7 @@ type AddonInstallerInterface interface {
 	InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *addons.ProviderCredentials) error
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
+	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
 	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error)
 }
 
@@ -889,6 +890,22 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			return ctrl.Result{RequeueAfter: requeueShort}, nil
 		}
 		r.setAddonInstalled(cb, "provider-config")
+	}
+
+	// 9.7. Butler Addons (addon definitions catalog)
+	if addons.IsButlerControllerEnabled() {
+		if !r.isAddonInstalled(cb, "butler-addons") {
+			logger.Info("Installing Butler addon definitions")
+			if err := r.AddonInstaller.InstallButlerAddons(ctx, kubeconfig, "0.1.0"); err != nil {
+				logger.Error(err, "Failed to install Butler addon definitions")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			r.setAddonInstalled(cb, "butler-addons")
+			logger.Info("Butler addon definitions installed successfully")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Info("Failed to update status after Butler addons install", "error", err)
+			}
+		}
 	}
 
 	// 10. Butler Controller

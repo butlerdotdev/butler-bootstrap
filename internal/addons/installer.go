@@ -693,8 +693,6 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 		return fmt.Errorf("failed to prepare butler-system namespace: %w", err)
 	}
 
-	// TODO: Install Butler CRDs and controllers
-	// For now, just ensure namespace exists
 	logger.Info("Butler namespace created - full installation pending")
 
 	return nil
@@ -743,6 +741,38 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 	i.runKubectl(ctx, kubeconfigPath, "create", "namespace", "butler-tenants")
 
 	logger.Info("Butler platform CRDs installed successfully")
+	return nil
+}
+
+func (i *Installer) InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Installing Butler addon definitions", "version", version)
+
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+	defer cleanup()
+
+	if version == "" {
+		version = "0.1.0"
+	}
+
+	args := []string{
+		"upgrade", "--install",
+		"butler-addons",
+		"oci://ghcr.io/butlerdotdev/charts/butler-addons",
+		"--version", version,
+		"-n", "butler-system",
+		"--wait",
+		"--timeout", "2m",
+	}
+
+	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
+		return fmt.Errorf("failed to install butler-addons: %w", err)
+	}
+
+	logger.Info("Butler addon definitions installed successfully")
 	return nil
 }
 
