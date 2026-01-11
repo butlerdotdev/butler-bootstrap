@@ -10,7 +10,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.22.4
 )
 
-require github.com/butlerdotdev/butler-api v0.0.0-20260111224605-3f3b3ab6c0c6
+require github.com/butlerdotdev/butler-api v0.0.0-20260111232338-6d42b6ae4462
 
 require (
 	cel.dev/expr v0.24.0 // indirect
