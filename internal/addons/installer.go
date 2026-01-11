@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
-	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
 
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/log"
