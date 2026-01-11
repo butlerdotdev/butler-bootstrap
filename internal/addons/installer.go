@@ -1365,9 +1365,11 @@ kind: ClusterRole
 metadata:
   name: butler-controller-role
 rules:
+# Butler CRDs
 - apiGroups: ["butler.butlerlabs.dev"]
   resources: ["*"]
   verbs: ["*"]
+# CAPI resources
 - apiGroups: ["cluster.x-k8s.io"]
   resources: ["*"]
   verbs: ["*"]
@@ -1383,17 +1385,34 @@ rules:
 - apiGroups: ["kamaji.clastix.io"]
   resources: ["*"]
   verbs: ["*"]
+# Core resources - needed for Helm chart installs in ANY namespace
 - apiGroups: [""]
-  resources: ["secrets", "configmaps", "namespaces", "services", "events"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["batch"]
+  resources: ["*"]
   verbs: ["*"]
 - apiGroups: ["rbac.authorization.k8s.io"]
-  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  resources: ["*"]
   verbs: ["*"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["policy"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["autoscaling"]
+  resources: ["*"]
+  verbs: ["*"]
+# Flux
 - apiGroups: ["helm.toolkit.fluxcd.io"]
-  resources: ["helmreleases"]
+  resources: ["*"]
   verbs: ["*"]
 - apiGroups: ["source.toolkit.fluxcd.io"]
-  resources: ["helmrepositories", "helmcharts"]
+  resources: ["*"]
   verbs: ["*"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
