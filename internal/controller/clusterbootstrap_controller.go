@@ -98,7 +98,7 @@ type AddonInstallerInterface interface {
 	InstallCilium(ctx context.Context, kubeconfig []byte, version string, hubbleEnabled bool) error
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
-	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string) error
+	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
@@ -775,7 +775,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		if !r.isAddonInstalled(cb, "metallb") {
 			logger.Info("Installing MetalLB")
 
-			if err := r.AddonInstaller.InstallMetalLB(ctx, kubeconfig, addons.LoadBalancer.AddressPool); err != nil {
+			if err := r.AddonInstaller.InstallMetalLB(ctx, kubeconfig, addons.LoadBalancer.AddressPool, string(cb.Spec.Cluster.Topology)); err != nil {
 				logger.Error(err, "Failed to install MetalLB")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}

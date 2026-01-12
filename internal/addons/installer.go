@@ -501,7 +501,7 @@ func (i *Installer) InstallLonghorn(ctx context.Context, kubeconfig []byte, vers
 }
 
 // InstallMetalLB installs MetalLB load balancer with the specified address pool.
-func (i *Installer) InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string) error {
+func (i *Installer) InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -523,8 +523,8 @@ func (i *Installer) InstallMetalLB(ctx context.Context, kubeconfig []byte, addre
 	// For single-node clusters, remove the exclude-from-external-load-balancers label
 	// from control plane nodes so MetalLB L2 can announce from them.
 	// See: https://github.com/metallb/metallb/issues/2676
-	if i.isSingleNodeCluster(ctx, kubeconfigPath) {
-		logger.Info("Single-node cluster detected, enabling MetalLB L2 on control plane node")
+	if topology == "single-node" {
+		logger.Info("Single-node topology, enabling MetalLB L2 on control plane node")
 		if err := i.runKubectl(ctx, kubeconfigPath, "label", "nodes", "--all",
 			"node.kubernetes.io/exclude-from-external-load-balancers-"); err != nil {
 			logger.Info("Failed to remove exclude label (may not exist)", "error", err)
