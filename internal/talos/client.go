@@ -101,6 +101,10 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 	if opts.AllowSchedulingOnControlPlanes {
 		logger.Info("Enabling workload scheduling on control planes (single-node mode)")
 		args = append(args, "--config-patch", `[{"op": "add", "path": "/cluster/allowSchedulingOnControlPlanes", "value": true}]`)
+
+		// Remove the exclude-from-external-load-balancers label so MetalLB L2 can announce from control plane
+		// Note: ~1 is JSON Patch escape for / in key names
+		args = append(args, "--config-patch-control-plane", `[{"op": "remove", "path": "/machine/nodeLabels/node.kubernetes.io~1exclude-from-external-load-balancers"}]`)
 	}
 
 	// Add custom patches
