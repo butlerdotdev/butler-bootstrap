@@ -230,6 +230,7 @@ func (c *Client) GetKubeconfig(ctx context.Context, nodeIP string) ([]byte, erro
 		"--nodes", nodeIP,
 		"--endpoints", nodeIP,
 		"--force",
+		"--merge=false",
 		kubeconfigPath,
 	}
 
