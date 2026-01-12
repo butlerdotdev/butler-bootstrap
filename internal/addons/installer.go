@@ -193,6 +193,29 @@ func (i *Installer) ensurePrivilegedNamespace(ctx context.Context, kubeconfigPat
 	return nil
 }
 
+// isSingleNodeCluster checks if the cluster has only one node.
+// Used to determine if MetalLB needs special configuration for L2 announcements.
+func (i *Installer) isSingleNodeCluster(ctx context.Context, kubeconfigPath string) bool {
+	args := []string{
+		"--kubeconfig", kubeconfigPath,
+		"--insecure-skip-tls-verify",
+		"get", "nodes",
+		"-o", "jsonpath={.items[*].metadata.name}",
+	}
+	if i.NodeIP != "" {
+		args = append(args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
+	}
+
+	cmd := exec.CommandContext(ctx, i.KubectlPath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	nodes := strings.Fields(string(output))
+	return len(nodes) == 1
+}
+
 // InstallKubeVip installs kube-vip for control plane HA ONLY.
 func (i *Installer) InstallKubeVip(ctx context.Context, kubeconfig []byte, vip string, iface string, version string) error {
 	logger := log.FromContext(ctx)
@@ -495,6 +518,17 @@ func (i *Installer) InstallMetalLB(ctx context.Context, kubeconfig []byte, addre
 	// Ensure namespace exists and is privileged BEFORE helm install
 	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "metallb-system"); err != nil {
 		return fmt.Errorf("failed to prepare metallb-system namespace: %w", err)
+	}
+
+	// For single-node clusters, remove the exclude-from-external-load-balancers label
+	// from control plane nodes so MetalLB L2 can announce from them.
+	// See: https://github.com/metallb/metallb/issues/2676
+	if i.isSingleNodeCluster(ctx, kubeconfigPath) {
+		logger.Info("Single-node cluster detected, enabling MetalLB L2 on control plane node")
+		if err := i.runKubectl(ctx, kubeconfigPath, "label", "nodes", "--all",
+			"node.kubernetes.io/exclude-from-external-load-balancers-"); err != nil {
+			logger.Info("Failed to remove exclude label (may not exist)", "error", err)
+		}
 	}
 
 	// Add MetalLB repo
