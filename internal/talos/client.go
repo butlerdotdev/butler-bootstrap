@@ -197,30 +197,46 @@ func (c *Client) ApplyConfig(ctx context.Context, nodeIP string, config []byte, 
 func (c *Client) Bootstrap(ctx context.Context, nodeIP string) error {
 	logger := log.FromContext(ctx)
 
-	args := []string{
-		"bootstrap",
-		"--nodes", nodeIP,
-		"--endpoints", nodeIP,
-	}
-
-	if c.TalosConfigPath != "" {
-		args = append(args, "--talosconfig", c.TalosConfigPath)
-	}
-
-	logger.Info("Running talosctl bootstrap", "node", nodeIP)
-
-	cmd := exec.CommandContext(ctx, c.TalosctlPath, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if strings.Contains(string(output), "already bootstrapped") ||
-			strings.Contains(string(output), "etcd data directory is not empty") {
-			logger.Info("Cluster already bootstrapped")
-			return nil
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			logger.Info("Retrying bootstrap after clock skew error", "attempt", attempt+1)
+			time.Sleep(5 * time.Second)
 		}
-		return fmt.Errorf("talosctl bootstrap failed: %w, output: %s", err, string(output))
+
+		args := []string{
+			"bootstrap",
+			"--nodes", nodeIP,
+			"--endpoints", nodeIP,
+		}
+
+		if c.TalosConfigPath != "" {
+			args = append(args, "--talosconfig", c.TalosConfigPath)
+		}
+
+		logger.Info("Running talosctl bootstrap", "node", nodeIP)
+
+		cmd := exec.CommandContext(ctx, c.TalosctlPath, args...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			outputStr := string(output)
+			if strings.Contains(outputStr, "already bootstrapped") ||
+				strings.Contains(outputStr, "etcd data directory is not empty") {
+				logger.Info("Cluster already bootstrapped")
+				return nil
+			}
+			// Retry on clock skew / cert not yet valid errors
+			if strings.Contains(outputStr, "certificate has expired or is not yet valid") {
+				lastErr = fmt.Errorf("talosctl bootstrap failed: %w, output: %s", err, outputStr)
+				continue
+			}
+			return fmt.Errorf("talosctl bootstrap failed: %w, output: %s", err, outputStr)
+		}
+
+		return nil
 	}
 
-	return nil
+	return lastErr
 }
 
 // GetKubeconfig retrieves the kubeconfig
