@@ -100,7 +100,9 @@ type AddonInstallerInterface interface {
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
-	InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error
+	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error // NEW: Gateway API CRDs
+	// InstallStewardCRDs(ctx context.Context, kubeconfig []byte, version string) error // NEW: Steward CRDs (optional)
+	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error // NEW: Replaces InstallKamaji
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
 	InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error
@@ -659,6 +661,8 @@ func isAddonEnabled(enabled *bool) bool {
 	return *enabled
 }
 
+// Part 2 of clusterbootstrap_controller.go - continues from part 1
+
 func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling InstallingAddons phase")
@@ -721,7 +725,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 3. cert-manager - needed by Traefik and Kamaji webhooks
+	// 3. cert-manager - needed by Traefik and Steward webhooks
 	if addons.CertManager == nil || isAddonEnabled(addons.CertManager.Enabled) {
 		if !r.isAddonInstalled(cb, "cert-manager") {
 			logger.Info("Installing cert-manager")
@@ -810,24 +814,61 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 7. Kamaji - hosted control planes
+	// 7a. Gateway API CRDs - required for Steward TLSRoute support
+	// Install before Steward so the CRDs exist when Steward starts watching them
+	if !r.isAddonInstalled(cb, "gateway-api") {
+		logger.Info("Installing Gateway API CRDs")
+		if err := r.AddonInstaller.InstallGatewayAPI(ctx, kubeconfig, "v1.2.0"); err != nil {
+			logger.Error(err, "Failed to install Gateway API CRDs")
+			return ctrl.Result{RequeueAfter: requeueShort}, nil
+		}
+		r.setAddonInstalled(cb, "gateway-api")
+		logger.Info("Gateway API CRDs installed successfully")
+		if err := r.Status().Update(ctx, cb); err != nil {
+			logger.Info("Failed to update status after Gateway API install", "error", err)
+		}
+	}
+
+	// 7b. Steward CRDs - install before controller to ensure CRDs exist
+	// if addons.ControlPlaneProvider == nil || isAddonEnabled(addons.ControlPlaneProvider.Enabled) {
+	// 	if !r.isAddonInstalled(cb, "steward-crds") {
+	// 		logger.Info("Installing Steward CRDs")
+	// 		version := ""
+	// 		if addons.ControlPlaneProvider != nil && addons.ControlPlaneProvider.Version != "" {
+	// 			version = addons.ControlPlaneProvider.Version
+	// 		}
+	//
+	// 		if err := r.AddonInstaller.InstallStewardCRDs(ctx, kubeconfig, version); err != nil {
+	// 			logger.Error(err, "Failed to install Steward CRDs")
+	// 			return ctrl.Result{RequeueAfter: requeueShort}, nil
+	// 		}
+	//
+	// 		r.setAddonInstalled(cb, "steward-crds")
+	// 		logger.Info("Steward CRDs installed successfully")
+	// 		if err := r.Status().Update(ctx, cb); err != nil {
+	// 			logger.Info("Failed to update status after Steward CRDs install", "error", err)
+	// 		}
+	// 	}
+	// }
+
+	// 7c. Steward - hosted control planes (replaces Kamaji)
 	if addons.ControlPlaneProvider == nil || isAddonEnabled(addons.ControlPlaneProvider.Enabled) {
-		if !r.isAddonInstalled(cb, "kamaji") {
-			logger.Info("Installing Kamaji")
+		if !r.isAddonInstalled(cb, "steward") {
+			logger.Info("Installing Steward")
 			version := ""
 			if addons.ControlPlaneProvider != nil && addons.ControlPlaneProvider.Version != "" {
 				version = addons.ControlPlaneProvider.Version
 			}
 
-			if err := r.AddonInstaller.InstallKamaji(ctx, kubeconfig, version); err != nil {
-				logger.Error(err, "Failed to install Kamaji")
+			if err := r.AddonInstaller.InstallSteward(ctx, kubeconfig, version); err != nil {
+				logger.Error(err, "Failed to install Steward")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
 
-			r.setAddonInstalled(cb, "kamaji")
-			logger.Info("Kamaji installed successfully")
+			r.setAddonInstalled(cb, "steward")
+			logger.Info("Steward installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Kamaji install", "error", err)
+				logger.Info("Failed to update status after Steward install", "error", err)
 			}
 		}
 	}

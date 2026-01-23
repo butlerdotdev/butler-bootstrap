@@ -630,8 +630,8 @@ func (i *Installer) InstallTraefik(ctx context.Context, kubeconfig []byte, versi
 	return nil
 }
 
-// InstallKamaji installs Kamaji for hosted control planes
-func (i *Installer) InstallKamaji(ctx context.Context, kubeconfig []byte, version string) error {
+// InstallGatewayAPI installs Gateway API CRDs (required before Steward for TLSRoute support)
+func (i *Installer) InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -640,35 +640,119 @@ func (i *Installer) InstallKamaji(ctx context.Context, kubeconfig []byte, versio
 	defer cleanup()
 
 	if version == "" {
-		version = "1.0.0"
+		version = "v1.2.0"
 	}
 
-	logger.Info("Installing Kamaji", "version", version)
+	logger.Info("Installing Gateway API CRDs", "version", version)
+
+	// Install experimental channel (includes TLSRoute which Steward uses for SNI-based routing)
+	url := fmt.Sprintf("https://github.com/kubernetes-sigs/gateway-api/releases/download/%s/experimental-install.yaml", version)
+
+	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", url); err != nil {
+		return fmt.Errorf("failed to install Gateway API CRDs: %w", err)
+	}
+
+	// Wait for CRDs to be established
+	crds := []string{
+		"gatewayclasses.gateway.networking.k8s.io",
+		"gateways.gateway.networking.k8s.io",
+		"httproutes.gateway.networking.k8s.io",
+		"tlsroutes.gateway.networking.k8s.io",
+	}
+
+	for _, crd := range crds {
+		if err := i.runKubectl(ctx, kubeconfigPath, "wait", "--for=condition=Established",
+			"crd", crd, "--timeout=60s"); err != nil {
+			logger.Info("Gateway API CRD wait timeout (may already be ready)", "crd", crd)
+		}
+	}
+
+	logger.Info("Gateway API CRDs installed successfully")
+	return nil
+}
+
+// // InstallStewardCRDs installs Steward CRDs separately (optional - main chart includes CRDs)
+// func (i *Installer) InstallStewardCRDs(ctx context.Context, kubeconfig []byte, version string) error {
+// 	logger := log.FromContext(ctx)
+// 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	defer cleanup()
+//
+// 	if version == "" {
+// 		version = "0.1.0"
+// 	}
+//
+// 	logger.Info("Installing Steward CRDs", "version", version)
+//
+// 	// Install Steward CRDs via OCI registry
+// 	args := []string{
+// 		"upgrade", "--install", "steward-crds",
+// 		"oci://ghcr.io/butlerdotdev/charts/steward-crds",
+// 		"--namespace", "steward-system",
+// 		"--create-namespace",
+// 		"--version", version,
+// 		"--wait",
+// 		"--timeout", "2m",
+// 	}
+//
+// 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
+// 		return fmt.Errorf("failed to install Steward CRDs: %w", err)
+// 	}
+//
+// 	// Wait for CRDs to be established
+// 	crds := []string{
+// 		"tenantcontrolplanes.steward.butlerlabs.dev",
+// 		"datastores.steward.butlerlabs.dev",
+// 	}
+//
+// 	for _, crd := range crds {
+// 		if err := i.runKubectl(ctx, kubeconfigPath, "wait", "--for=condition=Established",
+// 			"crd", crd, "--timeout=60s"); err != nil {
+// 			logger.Info("Steward CRD wait timeout (may already be ready)", "crd", crd)
+// 		}
+// 	}
+//
+// 	logger.Info("Steward CRDs installed successfully")
+// 	return nil
+// }
+
+// InstallSteward installs Steward for hosted control planes (replaces Kamaji)
+func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, version string) error {
+	logger := log.FromContext(ctx)
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if version == "" {
+		version = "0.1.0"
+	}
+
+	logger.Info("Installing Steward", "version", version)
 
 	// Ensure namespace exists and is privileged
-	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "kamaji-system"); err != nil {
-		return fmt.Errorf("failed to prepare kamaji-system namespace: %w", err)
+	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "steward-system"); err != nil {
+		return fmt.Errorf("failed to prepare steward-system namespace: %w", err)
 	}
 
-	// Add Clastix repo
-	if err := i.runHelm(ctx, kubeconfigPath, "repo", "add", "clastix", "https://clastix.github.io/charts"); err != nil {
-		logger.Info("helm repo add failed (may already exist)", "error", err)
-	}
-	if err := i.runHelm(ctx, kubeconfigPath, "repo", "update"); err != nil {
-		logger.Info("helm repo update failed", "error", err)
-	}
-
+	// Install Steward via OCI registry (no helm repo add needed for OCI)
 	args := []string{
-		"upgrade", "--install", "kamaji", "clastix/kamaji",
-		"--namespace", "kamaji-system",
+		"upgrade", "--install", "steward",
+		"oci://ghcr.io/butlerdotdev/charts/steward",
+		"--namespace", "steward-system",
 		"--version", version,
-		"--set", "etcd.deploy=true",
+		"--set", "image.repository=ghcr.io/butlerdotdev/steward",
+		"--set", "image.tag=v0.1.0-alpha",
+		"--set", "steward-etcd.deploy=true",
 		"--wait",
 		"--timeout", "5m",
 	}
 
 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
-		return fmt.Errorf("failed to install Kamaji: %w", err)
+		return fmt.Errorf("failed to install Steward: %w", err)
 	}
 
 	return nil
@@ -1121,11 +1205,19 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 
 	// Install CAPI core WITHOUT infrastructure providers
 	// We install infra providers manually to avoid clusterctl env var requirements
+	// NOTE: We still use --control-plane kamaji because:
+	// 1. The Kamaji CAPI provider creates KamajiControlPlane -> TenantControlPlane
+	// 2. We haven't built steward-capi-provider yet
+	// 3. For butler-controller's tenant cluster creation, we'll need to either:
+	//    a) Build steward-capi-provider (future work)
+	//    b) Have butler-controller create Steward TenantControlPlanes directly
+	// For now, this works because the management cluster's Steward installation
+	// is independent of CAPI - CAPI is for tenant cluster creation.
 	args := []string{
 		"init",
 		"--kubeconfig", kubeconfigPath,
 		"--bootstrap", "kubeadm",
-		"--control-plane", "kamaji",
+		// "--control-plane", "steward:v0.1.0", // TODO: Replace with steward-capi-provider when built
 		// NO --infrastructure flag - we install providers manually
 	}
 
@@ -1139,6 +1231,13 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 
 	logger.Info("CAPI core installed successfully")
 
+	// Install Steward CAPI provider manually
+	// Use server-side apply to avoid annotation size limit (CRD is too large for client-side apply)
+	logger.Info("Installing Steward CAPI provider manually")
+	stewardURL := "https://github.com/butlerdotdev/cluster-api-control-plane-provider-steward/releases/download/v0.1.0/control-plane-components.yaml"
+	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", stewardURL); err != nil {
+		return fmt.Errorf("failed to install Steward CAPI provider: %w", err)
+	}
 	// Install infrastructure provider manually with credentials
 	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, creds); err != nil {
 		return fmt.Errorf("failed to install %s provider: %w", mgmtProvider, err)
@@ -1385,7 +1484,6 @@ func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []by
 }
 
 // generateButlerControllerManifest generates the deployment manifest
-// generateButlerControllerManifest generates the deployment manifest
 func (i *Installer) generateButlerControllerManifest(image string) string {
 	return fmt.Sprintf(`---
 apiVersion: v1
@@ -1416,6 +1514,11 @@ rules:
 - apiGroups: ["bootstrap.cluster.x-k8s.io"]
   resources: ["*"]
   verbs: ["*"]
+# Steward resources (hosted control planes)
+- apiGroups: ["steward.butlerlabs.dev"]
+  resources: ["*"]
+  verbs: ["*"]
+# Legacy Kamaji resources (for CAPI provider compatibility during transition)
 - apiGroups: ["kamaji.clastix.io"]
   resources: ["*"]
   verbs: ["*"]
@@ -1439,6 +1542,10 @@ rules:
   resources: ["*"]
   verbs: ["*"]
 - apiGroups: ["autoscaling"]
+  resources: ["*"]
+  verbs: ["*"]
+# Gateway API resources
+- apiGroups: ["gateway.networking.k8s.io"]
   resources: ["*"]
   verbs: ["*"]
 # Flux
