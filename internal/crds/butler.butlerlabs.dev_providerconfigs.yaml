@@ -182,8 +182,7 @@ spec:
                     type: string
                   templateID:
                     description: TemplateID is the VM template ID to clone.
-                    format: int32
-                    type: integer
+                    type: string
                   vmidRange:
                     description: VMIDRange defines the range of VM IDs to use.
                     properties:
