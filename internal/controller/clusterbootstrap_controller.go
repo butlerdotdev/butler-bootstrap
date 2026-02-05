@@ -21,11 +21,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
-
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -118,6 +118,7 @@ type AddonInstallerInterface interface {
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=clusterbootstraps/finalizers,verbs=update
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=machinerequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=providerconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=butlerconfigs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
 
 func (r *ClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -1012,6 +1013,30 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
+	// 11.5. Write ControlPlaneExposure config to ButlerConfig singleton
+	// This writes the platform-level exposure mode (LoadBalancer/Ingress/Gateway)
+	// which all TenantClusters will inherit
+	if !r.isAddonInstalled(cb, "butler-config-exposure") {
+		if cb.Spec.ControlPlaneExposure != nil {
+			logger.Info("Writing ControlPlaneExposure to ButlerConfig",
+				"mode", cb.Spec.ControlPlaneExposure.Mode)
+
+			if err := r.reconcileButlerConfig(ctx, cb, kubeconfig); err != nil {
+				logger.Error(err, "Failed to write ButlerConfig")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+
+			r.setAddonInstalled(cb, "butler-config-exposure")
+			logger.Info("ButlerConfig exposure settings written successfully")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Info("Failed to update status after ButlerConfig write", "error", err)
+			}
+		} else {
+			// No exposure config specified, skip but mark as done
+			r.setAddonInstalled(cb, "butler-config-exposure")
+		}
+	}
+
 	// 12. Butler Console
 	if addons.IsConsoleEnabled() {
 		if !r.isAddonInstalled(cb, "butler-console") {
@@ -1309,6 +1334,74 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// reconcileButlerConfig writes ControlPlaneExposure config from ClusterBootstrap to ButlerConfig singleton
+// on the target management cluster
+func (r *ClusterBootstrapReconciler) reconcileButlerConfig(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap, kubeconfig []byte) error {
+	logger := log.FromContext(ctx)
+
+	// Create a client to the target cluster using the kubeconfig
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("failed to create REST config from kubeconfig: %w", err)
+	}
+
+	targetClient, err := client.New(restConfig, client.Options{Scheme: r.Scheme})
+	if err != nil {
+		return fmt.Errorf("failed to create client for target cluster: %w", err)
+	}
+
+	// Get or create ButlerConfig singleton
+	bc := &butlerv1alpha1.ButlerConfig{}
+	err = targetClient.Get(ctx, client.ObjectKey{Name: "butler"}, bc)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Create new ButlerConfig
+			bc = &butlerv1alpha1.ButlerConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "butler",
+				},
+				Spec: butlerv1alpha1.ButlerConfigSpec{},
+			}
+		} else {
+			return fmt.Errorf("failed to get ButlerConfig: %w", err)
+		}
+	}
+
+	// Copy ControlPlaneExposure from ClusterBootstrap to ButlerConfig
+	if cb.Spec.ControlPlaneExposure != nil {
+		bc.Spec.ControlPlaneExposure = cb.Spec.ControlPlaneExposure.DeepCopy()
+		logger.Info("Setting ControlPlaneExposure on ButlerConfig",
+			"mode", bc.Spec.ControlPlaneExposure.Mode,
+			"hostname", bc.Spec.ControlPlaneExposure.Hostname)
+	}
+
+	// Create or update
+	if bc.ResourceVersion == "" {
+		// Create
+		if err := targetClient.Create(ctx, bc); err != nil {
+			return fmt.Errorf("failed to create ButlerConfig: %w", err)
+		}
+		logger.Info("Created ButlerConfig with ControlPlaneExposure settings")
+	} else {
+		// Update
+		if err := targetClient.Update(ctx, bc); err != nil {
+			return fmt.Errorf("failed to update ButlerConfig: %w", err)
+		}
+		logger.Info("Updated ButlerConfig with ControlPlaneExposure settings")
+	}
+
+	// Update ButlerConfig status
+	bc.Status.ControlPlaneExposureMode = cb.GetControlPlaneExposureMode()
+	bc.Status.TCPProxyRequired = cb.IsTCPProxyRequired()
+
+	if err := targetClient.Status().Update(ctx, bc); err != nil {
+		logger.Info("Failed to update ButlerConfig status", "error", err)
+		// Don't fail on status update error
+	}
+
+	return nil
 }
 
 func (r *ClusterBootstrapReconciler) SetupWithManager(mgr ctrl.Manager) error {
