@@ -47,7 +47,7 @@ flowchart TD
     
     subgraph MC[Management Cluster - Permanent]
         CAPI[Cluster API]
-        Kamaji[Kamaji]
+        Steward[Steward]
         Cilium[Cilium]
         Longhorn[Longhorn]
         MetalLB[MetalLB]
@@ -127,7 +127,7 @@ The controller installs addons in a specific order to satisfy dependencies:
 4. Longhorn (distributed storage)
 5. MetalLB (LoadBalancer services)
 6. Traefik (ingress controller)
-7. Kamaji (hosted control planes)
+7. Steward (hosted control planes)
 8. Cluster API (cluster lifecycle management)
 9. Flux (GitOps, optional)
 10. butler-controller (tenant cluster management)
