@@ -95,7 +95,7 @@ type TalosConfigs struct {
 type AddonInstallerInterface interface {
 	SetNodeIP(ip string)
 	InstallKubeVip(ctx context.Context, kubeconfig []byte, vip string, iface string, version string) error
-	InstallCilium(ctx context.Context, kubeconfig []byte, version string, hubbleEnabled bool) error
+	InstallCilium(ctx context.Context, kubeconfig []byte, version string, hubbleEnabled bool, gatewayAPIEnabled bool) error
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
@@ -712,8 +712,10 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Installing Cilium")
 			version := addons.CNI.Version
 			hubble := addons.CNI.HubbleEnabled
+			gatewayAPI := cb.Spec.ControlPlaneExposure != nil &&
+				cb.Spec.ControlPlaneExposure.Mode == butlerv1alpha1.ControlPlaneExposureModeGateway
 
-			if err := r.AddonInstaller.InstallCilium(ctx, kubeconfig, version, hubble); err != nil {
+			if err := r.AddonInstaller.InstallCilium(ctx, kubeconfig, version, hubble, gatewayAPI); err != nil {
 				logger.Error(err, "Failed to install Cilium")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}

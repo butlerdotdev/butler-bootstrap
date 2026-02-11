@@ -357,7 +357,7 @@ spec:
 }
 
 // InstallCilium installs Cilium CNI
-func (i *Installer) InstallCilium(ctx context.Context, kubeconfig []byte, version string, hubbleEnabled bool) error {
+func (i *Installer) InstallCilium(ctx context.Context, kubeconfig []byte, version string, hubbleEnabled bool, gatewayAPIEnabled bool) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -400,6 +400,12 @@ func (i *Installer) InstallCilium(ctx context.Context, kubeconfig []byte, versio
 		args = append(args,
 			"--set", "hubble.relay.enabled=true",
 			"--set", "hubble.ui.enabled=true",
+		)
+	}
+
+	if gatewayAPIEnabled {
+		args = append(args,
+			"--set", "gatewayAPI.enabled=true",
 		)
 	}
 
@@ -640,7 +646,7 @@ func (i *Installer) InstallGatewayAPI(ctx context.Context, kubeconfig []byte, ve
 	defer cleanup()
 
 	if version == "" {
-		version = "v1.2.0"
+		version = "v1.2.1"
 	}
 
 	logger.Info("Installing Gateway API CRDs", "version", version)
