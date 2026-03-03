@@ -1,6 +1,24 @@
-# butler-bootstrap
+<p align="center">
+  <img src="https://raw.githubusercontent.com/butlerdotdev/butler/main/assets/mascots/butler.png" alt="Butler" width="150"/>
+</p>
 
-Bootstrap controller for provisioning Butler management clusters.
+<h1 align="center">Butler Bootstrap</h1>
+
+<p align="center">
+  Management cluster bootstrap controller for the <a href="https://github.com/butlerdotdev/butler">Butler</a> platform.
+</p>
+
+<p align="center">
+  <a href="https://github.com/butlerdotdev/butler-bootstrap/releases"><img src="https://img.shields.io/github/v/release/butlerdotdev/butler-bootstrap" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/butlerdotdev/butler-bootstrap" alt="License"></a>
+  <img src="https://img.shields.io/github/go-mod/go-version/butlerdotdev/butler-bootstrap" alt="Go Version">
+</p>
+
+<p align="center">
+  <a href="https://github.com/butlerdotdev/butler">Butler</a> · <a href="https://docs.butlerlabs.dev">Docs</a> · <a href="https://butlerlabs.dev">Website</a>
+</p>
+
+---
 
 ## Table of Contents
 
