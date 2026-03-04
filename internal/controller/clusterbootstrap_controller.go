@@ -1491,9 +1491,13 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 		}
 	}
 
-	// Resolve image version and architecture
+	// Resolve image version, architecture, and platform
 	version := cb.Spec.Talos.Version
+	// Architecture defaults to amd64 — all current Butler providers target amd64.
+	// When multi-arch support is added, this should read from the ClusterBootstrap spec.
 	arch := "amd64"
+	// Platform defaults to nocloud — works for KubeVirt/cloud-init targets (Harvester, Nutanix).
+	platform := "nocloud"
 
 	// Truncate schematicID to 63 chars for label value (Kubernetes label limit)
 	labelSchematicID := schematicID
@@ -1600,6 +1604,7 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 				SchematicID: schematicID,
 				Version:     version,
 				Arch:        arch,
+				Platform:    platform,
 			},
 			ProviderConfigRef: pcRef,
 			Format:            "qcow2",
