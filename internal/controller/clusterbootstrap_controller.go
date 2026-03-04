@@ -119,6 +119,7 @@ type AddonInstallerInterface interface {
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=machinerequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=providerconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=butlerconfigs,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=imagesyncs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
 
 func (r *ClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -285,6 +286,21 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 		"singleNode", isSingleNode,
 		"expectedMachines", expectedCount)
 
+	// Resolve OS image via ImageSync before creating MachineRequests.
+	// This ensures the image is available on the provider before VMs are created.
+	providerImageRef, err := r.reconcileImageSync(ctx, cb)
+	if err != nil {
+		logger.Info("Image sync not yet ready, waiting", "error", err)
+		if statusErr := r.Status().Update(ctx, cb); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: requeueMedium}, nil
+	}
+
+	if providerImageRef != "" {
+		logger.Info("Image sync resolved provider image", "providerImageRef", providerImageRef)
+	}
+
 	clusterName := cb.Spec.Cluster.Name
 
 	// Create control plane MachineRequests
@@ -292,7 +308,7 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 	cpReplicas := cb.GetControlPlaneReplicas()
 	for i := int32(0); i < cpReplicas; i++ {
 		mrName := fmt.Sprintf("%s-cp-%d", clusterName, i)
-		if err := r.ensureMachineRequest(ctx, cb, mrName, "control-plane", cb.Spec.Cluster.ControlPlane); err != nil {
+		if err := r.ensureMachineRequest(ctx, cb, mrName, "control-plane", cb.Spec.Cluster.ControlPlane, providerImageRef); err != nil {
 			logger.Error(err, "Failed to ensure control plane MachineRequest", "name", mrName)
 			return ctrl.Result{}, err
 		}
@@ -302,7 +318,7 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 	if !isSingleNode && cb.Spec.Cluster.Workers != nil {
 		for i := int32(0); i < cb.Spec.Cluster.Workers.Replicas; i++ {
 			mrName := fmt.Sprintf("%s-worker-%d", clusterName, i)
-			if err := r.ensureMachineRequest(ctx, cb, mrName, "worker", *cb.Spec.Cluster.Workers); err != nil {
+			if err := r.ensureMachineRequest(ctx, cb, mrName, "worker", *cb.Spec.Cluster.Workers, providerImageRef); err != nil {
 				logger.Error(err, "Failed to ensure worker MachineRequest", "name", mrName)
 				return ctrl.Result{}, err
 			}
@@ -344,7 +360,7 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 	return ctrl.Result{RequeueAfter: requeueMedium}, nil
 }
 
-func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap, name string, role string, pool butlerv1alpha1.ClusterBootstrapNodePool) error {
+func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap, name string, role string, pool butlerv1alpha1.ClusterBootstrapNodePool, imageOverride string) error {
 	logger := log.FromContext(ctx)
 
 	mr := &butlerv1alpha1.MachineRequest{}
@@ -385,6 +401,7 @@ func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, c
 			MemoryMB:    pool.MemoryMB,
 			DiskGB:      pool.DiskGB,
 			Labels:      pool.Labels,
+			Image:       imageOverride,
 		},
 	}
 
@@ -392,7 +409,7 @@ func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, c
 		return err
 	}
 
-	logger.Info("Created MachineRequest", "name", name, "role", role)
+	logger.Info("Created MachineRequest", "name", name, "role", role, "image", imageOverride)
 	return nil
 }
 
@@ -1406,9 +1423,211 @@ func (r *ClusterBootstrapReconciler) reconcileButlerConfig(ctx context.Context, 
 	return nil
 }
 
+// reconcileImageSync ensures the OS image is synced to the infrastructure provider
+// via the Butler Image Factory before MachineRequests are created.
+//
+// It resolves the schematicID from the ClusterBootstrap spec (talos.schematic) or
+// the ButlerConfig default, creates an ImageSync resource for deduplication, and
+// returns the provider-specific image reference once the sync is complete.
+//
+// Returns:
+//   - providerImageRef: the provider-specific image reference (e.g., "default/talos-v1.12.4-amd64").
+//     Empty string if no sync is needed (no schematic configured, auto-sync disabled, or
+//     no ButlerConfig/ImageFactory configured).
+//   - error: non-nil triggers a requeue (image sync in progress, failed, or creation error).
+func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (string, error) {
+	logger := log.FromContext(ctx)
+
+	// Resolve schematicID: ClusterBootstrap talos.schematic takes precedence
+	schematicID := cb.Spec.Talos.Schematic
+	if schematicID == "" {
+		// Fall back to ButlerConfig default
+		bc := &butlerv1alpha1.ButlerConfig{}
+		if err := r.Get(ctx, client.ObjectKey{Name: "butler"}, bc); err != nil {
+			if errors.IsNotFound(err) {
+				// No ButlerConfig — no image sync needed
+				logger.V(1).Info("No ButlerConfig found, skipping image sync")
+				return "", nil
+			}
+			return "", fmt.Errorf("failed to get ButlerConfig: %w", err)
+		}
+
+		if bc.Spec.ImageFactory != nil {
+			schematicID = bc.Spec.ImageFactory.DefaultSchematicID
+		}
+
+		if schematicID == "" {
+			// No schematic configured anywhere — skip image sync
+			return "", nil
+		}
+
+		// Image Factory must be configured if a schematicID is set
+		if !bc.IsImageFactoryConfigured() {
+			return "", fmt.Errorf("schematicID %q is set but Image Factory is not configured in ButlerConfig", schematicID)
+		}
+
+		// Check if auto-sync is enabled
+		if !bc.IsAutoSyncEnabled() {
+			logger.V(1).Info("Image auto-sync disabled in ButlerConfig, skipping ImageSync creation")
+			return "", nil
+		}
+	} else {
+		// SchematicID is set directly on the ClusterBootstrap — verify ButlerConfig
+		bc := &butlerv1alpha1.ButlerConfig{}
+		if err := r.Get(ctx, client.ObjectKey{Name: "butler"}, bc); err != nil {
+			if errors.IsNotFound(err) {
+				return "", fmt.Errorf("schematicID %q is set but no ButlerConfig exists", schematicID)
+			}
+			return "", fmt.Errorf("failed to get ButlerConfig: %w", err)
+		}
+
+		if !bc.IsImageFactoryConfigured() {
+			return "", fmt.Errorf("schematicID %q is set but Image Factory is not configured in ButlerConfig", schematicID)
+		}
+
+		if !bc.IsAutoSyncEnabled() {
+			logger.V(1).Info("Image auto-sync disabled in ButlerConfig, skipping ImageSync creation")
+			return "", nil
+		}
+	}
+
+	// Resolve image version and architecture
+	version := cb.Spec.Talos.Version
+	arch := "amd64"
+
+	// Truncate schematicID to 63 chars for label value (Kubernetes label limit)
+	labelSchematicID := schematicID
+	if len(labelSchematicID) > 63 {
+		labelSchematicID = labelSchematicID[:63]
+	}
+
+	// Build label selector for deduplication across ClusterBootstraps
+	matchLabels := map[string]string{
+		butlerv1alpha1.LabelSchematicID:    labelSchematicID,
+		butlerv1alpha1.LabelImageVersion:   version,
+		butlerv1alpha1.LabelProviderConfig: cb.Spec.ProviderRef.Name,
+		butlerv1alpha1.LabelImageArch:      arch,
+	}
+
+	// List existing ImageSyncs matching labels in the bootstrap's namespace
+	var existingList butlerv1alpha1.ImageSyncList
+	if err := r.List(ctx, &existingList,
+		client.InNamespace(cb.Namespace),
+		client.MatchingLabels(matchLabels),
+	); err != nil {
+		return "", fmt.Errorf("failed to list ImageSyncs: %w", err)
+	}
+
+	if len(existingList.Items) > 0 {
+		is := &existingList.Items[0]
+
+		switch {
+		case is.IsReady():
+			logger.Info("ImageSync is ready",
+				"name", is.Name,
+				"providerImageRef", is.Status.ProviderImageRef)
+			return is.Status.ProviderImageRef, nil
+
+		case is.IsFailed():
+			reason := is.Status.FailureReason
+			if reason == "" {
+				reason = "ImageSyncFailed"
+			}
+			message := is.Status.FailureMessage
+			if message == "" {
+				message = "Image sync failed"
+			}
+			r.setFailure(cb, reason, fmt.Sprintf("ImageSync %s failed: %s", is.Name, message))
+			return "", fmt.Errorf("ImageSync %s failed: %s", is.Name, message)
+
+		default:
+			// In progress (Pending, Building, Downloading, Uploading)
+			logger.Info("ImageSync in progress, requeueing",
+				"name", is.Name,
+				"phase", is.Status.Phase)
+			return "", fmt.Errorf("ImageSync %s is in progress (phase: %s)", is.Name, is.Status.Phase)
+		}
+	}
+
+	// No existing ImageSync found — create one
+
+	// Build a short, DNS-safe name
+	schematicPrefix := schematicID
+	if len(schematicPrefix) > 8 {
+		schematicPrefix = schematicPrefix[:8]
+	}
+	// Sanitize version for DNS label (replace dots with dashes, strip leading 'v')
+	sanitizedVersion := strings.ReplaceAll(version, ".", "-")
+	sanitizedVersion = strings.TrimPrefix(sanitizedVersion, "v")
+	imageSyncName := fmt.Sprintf("%s-%s-%s", cb.Spec.Cluster.Name, schematicPrefix, sanitizedVersion)
+	// Ensure name is DNS-safe (max 253 chars for object names, but keep it reasonable)
+	if len(imageSyncName) > 63 {
+		imageSyncName = imageSyncName[:63]
+	}
+
+	// Resolve provider config reference
+	pcRef := butlerv1alpha1.ProviderReference{
+		Name: cb.Spec.ProviderRef.Name,
+	}
+	if cb.Spec.ProviderRef.Namespace != "" && cb.Spec.ProviderRef.Namespace != cb.Namespace {
+		pcRef.Namespace = cb.Spec.ProviderRef.Namespace
+	}
+
+	is := &butlerv1alpha1.ImageSync{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      imageSyncName,
+			Namespace: cb.Namespace,
+			Labels: map[string]string{
+				butlerv1alpha1.LabelManagedBy:       "butler",
+				butlerv1alpha1.LabelSchematicID:     labelSchematicID,
+				butlerv1alpha1.LabelImageVersion:    version,
+				butlerv1alpha1.LabelProviderConfig:  cb.Spec.ProviderRef.Name,
+				butlerv1alpha1.LabelImageArch:       arch,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         cb.APIVersion,
+					Kind:               cb.Kind,
+					Name:               cb.Name,
+					UID:                cb.UID,
+					Controller:         boolPtr(true),
+					BlockOwnerDeletion: boolPtr(true),
+				},
+			},
+		},
+		Spec: butlerv1alpha1.ImageSyncSpec{
+			FactoryRef: butlerv1alpha1.ImageFactoryRef{
+				SchematicID: schematicID,
+				Version:     version,
+				Arch:        arch,
+			},
+			ProviderConfigRef: pcRef,
+			Format:            "qcow2",
+			TransferMode:      butlerv1alpha1.TransferModeDirect,
+		},
+	}
+
+	logger.Info("Creating ImageSync",
+		"name", is.Name,
+		"schematicID", schematicID,
+		"version", version,
+		"provider", cb.Spec.ProviderRef.Name)
+
+	if err := r.Create(ctx, is); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Race condition — another reconcile created it. Requeue to pick it up.
+			return "", fmt.Errorf("ImageSync %s was just created, requeueing", imageSyncName)
+		}
+		return "", fmt.Errorf("failed to create ImageSync %s: %w", imageSyncName, err)
+	}
+
+	return "", fmt.Errorf("ImageSync %s created, waiting for completion", imageSyncName)
+}
+
 func (r *ClusterBootstrapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&butlerv1alpha1.ClusterBootstrap{}).
 		Owns(&butlerv1alpha1.MachineRequest{}).
+		Owns(&butlerv1alpha1.ImageSync{}).
 		Complete(r)
 }
