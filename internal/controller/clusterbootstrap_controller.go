@@ -1496,8 +1496,11 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 	// Architecture defaults to amd64 — all current Butler providers target amd64.
 	// When multi-arch support is added, this should read from the ClusterBootstrap spec.
 	arch := "amd64"
-	// Platform defaults to nocloud — works for KubeVirt/cloud-init targets (Harvester, Nutanix).
-	platform := "nocloud"
+	// Platform is the artifact name prefix in the factory URL.
+	// For Butler Image Factory: use "talos" (bootstrap always uses Talos).
+	// For Siderolabs factory (factory.talos.dev): use "nocloud" (or metal, vmware, etc.).
+	// Bootstrap always uses Talos for management clusters.
+	platform := "talos"
 
 	// Truncate schematicID to 63 chars for label value (Kubernetes label limit)
 	labelSchematicID := schematicID
