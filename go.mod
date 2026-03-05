@@ -10,7 +10,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.22.4
 )
 
-require github.com/butlerdotdev/butler-api v0.5.0
+require github.com/butlerdotdev/butler-api v0.6.0
 
 require (
 	cel.dev/expr v0.24.0 // indirect
@@ -100,5 +100,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace github.com/butlerdotdev/butler-api => ../butler-api
