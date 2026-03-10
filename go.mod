@@ -2,6 +2,8 @@ module github.com/butlerdotdev/butler-bootstrap
 
 go 1.24.6
 
+replace github.com/butlerdotdev/butler-api => ../butler-api
+
 require (
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1
@@ -10,7 +12,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.22.4
 )
 
-require github.com/butlerdotdev/butler-api v0.6.0
+require github.com/butlerdotdev/butler-api v0.7.0
 
 require (
 	cel.dev/expr v0.24.0 // indirect
