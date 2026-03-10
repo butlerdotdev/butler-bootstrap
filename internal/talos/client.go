@@ -96,6 +96,15 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 	// Disable kube-proxy (Cilium handles this)
 	args = append(args, "--config-patch", `[{"op": "add", "path": "/cluster/proxy", "value": {"disabled": true}}]`)
 
+	// Set cloud platform for metadata discovery and cloud-init.
+	// Without this, Talos defaults to the metal platform which does not
+	// query cloud instance metadata services.
+	if opts.Platform != "" {
+		args = append(args, "--config-patch", fmt.Sprintf(
+			`[{"op": "add", "path": "/machine/install/platform", "value": "%s"}]`,
+			opts.Platform))
+	}
+
 	// Allow scheduling on control planes for single-node clusters
 	// This enables workloads to run on the single control plane node
 	if opts.AllowSchedulingOnControlPlanes {

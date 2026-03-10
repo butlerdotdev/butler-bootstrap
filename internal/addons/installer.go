@@ -43,6 +43,8 @@ type ProviderCredentials struct {
 	VSphere   *VSphereCredentials
 	Proxmox   *ProxmoxCredentials
 	GCP       *GCPCredentials
+	AWS       *AWSCredentials
+	Azure     *AzureCredentials
 }
 
 // NutanixCredentials holds Nutanix Prism Central credentials
@@ -91,6 +93,28 @@ type GCPCredentials struct {
 	MachineType       string
 	ImageProject      string
 	ImageFamily       string
+}
+
+// AWSCredentials holds AWS credentials for EC2 provisioning.
+type AWSCredentials struct {
+	AccessKeyID     string
+	SecretAccessKey  string
+	Region           string
+	VPCID            string
+	SubnetID         string
+	SecurityGroupID  string
+}
+
+// AzureCredentials holds Azure credentials for VM provisioning.
+type AzureCredentials struct {
+	ClientID       string
+	ClientSecret   string
+	TenantID       string
+	SubscriptionID string
+	ResourceGroup  string
+	Location       string
+	VNetName       string
+	SubnetName     string
 }
 
 // NewInstaller creates a new addon installer
@@ -987,6 +1011,16 @@ func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig
 			return fmt.Errorf("gcp credentials required")
 		}
 		secretManifest, providerConfigManifest = i.generateGCPProviderConfig(creds.GCP)
+	case "aws":
+		if creds == nil || creds.AWS == nil {
+			return fmt.Errorf("aws credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateAWSProviderConfig(creds.AWS)
+	case "azure":
+		if creds == nil || creds.Azure == nil {
+			return fmt.Errorf("azure credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateAzureProviderConfig(creds.Azure)
 	default:
 		logger.Info("Provider type not yet supported for ProviderConfig creation, skipping", "provider", providerType)
 		return nil
@@ -1267,6 +1301,99 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
+func (i *Installer) generateAWSProviderConfig(creds *AWSCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  accessKeyID: "%s"
+  secretAccessKey: "%s"
+`, creds.AccessKeyID, creds.SecretAccessKey)
+
+	awsConfig := fmt.Sprintf(`    region: "%s"`, creds.Region)
+
+	if creds.VPCID != "" {
+		awsConfig += fmt.Sprintf(`
+    vpcID: "%s"`, creds.VPCID)
+	}
+	if creds.SubnetID != "" {
+		awsConfig += fmt.Sprintf(`
+    subnetIDs:
+    - "%s"`, creds.SubnetID)
+	}
+	if creds.SecurityGroupID != "" {
+		awsConfig += fmt.Sprintf(`
+    securityGroupIDs:
+    - "%s"`, creds.SecurityGroupID)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: aws
+  namespace: butler-system
+spec:
+  provider: aws
+  credentialsRef:
+    name: aws-credentials
+    namespace: butler-system
+  aws:
+%s
+`, awsConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
+func (i *Installer) generateAzureProviderConfig(creds *AzureCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  clientID: "%s"
+  clientSecret: "%s"
+  tenantID: "%s"
+  subscriptionID: "%s"
+`, creds.ClientID, creds.ClientSecret, creds.TenantID, creds.SubscriptionID)
+
+	azureConfig := fmt.Sprintf(`    subscriptionID: "%s"
+    resourceGroup: "%s"`, creds.SubscriptionID, creds.ResourceGroup)
+
+	if creds.Location != "" {
+		azureConfig += fmt.Sprintf(`
+    location: "%s"`, creds.Location)
+	}
+	if creds.VNetName != "" {
+		azureConfig += fmt.Sprintf(`
+    vnetName: "%s"`, creds.VNetName)
+	}
+	if creds.SubnetName != "" {
+		azureConfig += fmt.Sprintf(`
+    subnetName: "%s"`, creds.SubnetName)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: azure
+  namespace: butler-system
+spec:
+  provider: azure
+  credentialsRef:
+    name: azure-credentials
+    namespace: butler-system
+  azure:
+%s
+`, azureConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
 // InstallCAPI installs Cluster API with the specified infrastructure providers
 func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
@@ -1377,6 +1504,12 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 	case "gcp":
 		namespace = "capg-system"
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.8.0/infrastructure-components.yaml"
+	case "aws":
+		namespace = "capa-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v2.7.0/infrastructure-components.yaml"
+	case "azure":
+		namespace = "capz-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-azure/releases/download/v1.17.0/infrastructure-components.yaml"
 	default:
 		logger.Info("Unknown provider, skipping", "provider", provider)
 		return nil
