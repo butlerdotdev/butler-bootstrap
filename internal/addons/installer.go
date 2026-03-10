@@ -628,6 +628,53 @@ spec:
 	return i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name())
 }
 
+// InstallCloudControllerManager installs the cloud-specific CCM via Helm.
+// CCM is required for LoadBalancer services to get external IPs on cloud providers.
+func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error {
+	logger := log.FromContext(ctx)
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	logger.Info("Installing Cloud Controller Manager", "provider", provider)
+	i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "kube-system")
+
+	switch provider {
+	case "gcp":
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
+			"https://kubernetes-sigs.github.io/cloud-provider-gcp")
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+		return i.runHelm(ctx, kubeconfigPath,
+			"upgrade", "--install", "cloud-controller-manager",
+			"cloud-provider-gcp/cloud-provider-gcp",
+			"--namespace", "kube-system",
+			"--wait", "--timeout", "5m")
+	case "aws":
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "aws-cloud-controller-manager",
+			"https://kubernetes.github.io/cloud-provider-aws")
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+		return i.runHelm(ctx, kubeconfigPath,
+			"upgrade", "--install", "aws-cloud-controller-manager",
+			"aws-cloud-controller-manager/aws-cloud-controller-manager",
+			"--namespace", "kube-system",
+			"--wait", "--timeout", "5m")
+	case "azure":
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",
+			"https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/helm/repo")
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+		return i.runHelm(ctx, kubeconfigPath,
+			"upgrade", "--install", "cloud-controller-manager",
+			"cloud-provider-azure/cloud-controller-manager",
+			"--namespace", "kube-system",
+			"--wait", "--timeout", "5m")
+	default:
+		logger.Info("No CCM needed for provider", "provider", provider)
+		return nil
+	}
+}
+
 // InstallTraefik installs Traefik ingress controller
 func (i *Installer) InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)

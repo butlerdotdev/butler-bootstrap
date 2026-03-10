@@ -103,6 +103,12 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 		args = append(args, "--config-patch", fmt.Sprintf(
 			`[{"op": "add", "path": "/machine/install/platform", "value": "%s"}]`,
 			opts.Platform))
+
+		// CCM requires kubelet to start with --cloud-provider=external.
+		// Without this, kubelet registers nodes as bare metal and CCM
+		// cannot manage node lifecycle or provision LoadBalancer services.
+		args = append(args, "--config-patch",
+			`[{"op": "add", "path": "/machine/kubelet/extraArgs", "value": {"cloud-provider": "external"}}]`)
 	}
 
 	// Allow scheduling on control planes for single-node clusters

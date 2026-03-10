@@ -100,6 +100,7 @@ type AddonInstallerInterface interface {
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
+	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error // NEW: Gateway API CRDs
 	// InstallStewardCRDs(ctx context.Context, kubeconfig []byte, version string) error // NEW: Steward CRDs (optional)
@@ -702,9 +703,9 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 
 	// 1. kube-vip - required for VIP to work on on-prem providers.
 	// Cloud providers (gcp, aws, azure) skip kube-vip because cloud networks
-	// do not support gratuitous ARP. The first CP node IP is used instead.
+	// do not support gratuitous ARP. Cloud HA uses a cloud load balancer instead.
 	if !r.isAddonInstalled(cb, "kube-vip") {
-		if cb.Spec.Network.VIP != "" {
+		if cb.Spec.Network.VIP != "" && !cb.IsCloudProvider() {
 			logger.Info("Installing kube-vip")
 			version := "v0.8.7"
 			if addons.ControlPlaneHA != nil && addons.ControlPlaneHA.Version != "" {
@@ -721,8 +722,10 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
 			logger.Info("kube-vip installed successfully")
+		} else if cb.IsCloudProvider() {
+			logger.Info("Skipping kube-vip (cloud provider uses cloud load balancer)")
 		} else {
-			logger.Info("Skipping kube-vip, no VIP configured (cloud provider)")
+			logger.Info("Skipping kube-vip (no VIP configured)")
 		}
 
 		r.setAddonInstalled(cb, "kube-vip")
@@ -749,6 +752,22 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Cilium installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
 				logger.Info("Failed to update status after Cilium install", "error", err)
+			}
+		}
+	}
+
+	// 2.5 Cloud Controller Manager - cloud providers only.
+	// Replaces MetalLB for LoadBalancer service provisioning on cloud.
+	if cb.IsCloudProvider() {
+		if !r.isAddonInstalled(cb, "cloud-controller-manager") {
+			logger.Info("Installing Cloud Controller Manager", "provider", cb.Spec.Provider)
+			if err := r.AddonInstaller.InstallCloudControllerManager(ctx, kubeconfig, cb.Spec.Provider); err != nil {
+				logger.Error(err, "Failed to install Cloud Controller Manager — LoadBalancer services will remain Pending until CCM is installed. NodePort and port-forward still work.")
+			}
+
+			r.setAddonInstalled(cb, "cloud-controller-manager")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Info("Failed to update status after CCM install", "error", err)
 			}
 		}
 	}
