@@ -42,6 +42,7 @@ type ProviderCredentials struct {
 	Harvester *HarvesterCredentials
 	VSphere   *VSphereCredentials
 	Proxmox   *ProxmoxCredentials
+	GCP       *GCPCredentials
 }
 
 // NutanixCredentials holds Nutanix Prism Central credentials
@@ -77,6 +78,19 @@ type ProxmoxCredentials struct {
 	Endpoint string
 	Username string
 	Password string
+}
+
+// GCPCredentials holds GCP credentials
+type GCPCredentials struct {
+	ServiceAccountKey string // JSON service account key
+	ProjectID         string
+	Region            string
+	Network           string
+	Subnetwork        string
+	Zone              string
+	MachineType       string
+	ImageProject      string
+	ImageFamily       string
 }
 
 // NewInstaller creates a new addon installer
@@ -968,6 +982,11 @@ func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig
 			return fmt.Errorf("harvester credentials required")
 		}
 		secretManifest, providerConfigManifest = i.generateHarvesterProviderConfig(creds.Harvester)
+	case "gcp":
+		if creds == nil || creds.GCP == nil {
+			return fmt.Errorf("gcp credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateGCPProviderConfig(creds.GCP)
 	default:
 		logger.Info("Provider type not yet supported for ProviderConfig creation, skipping", "provider", providerType)
 		return nil
@@ -1191,6 +1210,63 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
+func (i *Installer) generateGCPProviderConfig(creds *GCPCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: gcp-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  serviceAccountKey: '%s'
+`, creds.ServiceAccountKey)
+
+	// Build GCP config section
+	gcpConfig := fmt.Sprintf(`    projectID: "%s"
+    region: "%s"`, creds.ProjectID, creds.Region)
+
+	if creds.Network != "" {
+		gcpConfig += fmt.Sprintf(`
+    network: "%s"`, creds.Network)
+	}
+	if creds.Subnetwork != "" {
+		gcpConfig += fmt.Sprintf(`
+    subnetwork: "%s"`, creds.Subnetwork)
+	}
+	if creds.Zone != "" {
+		gcpConfig += fmt.Sprintf(`
+    zone: "%s"`, creds.Zone)
+	}
+	if creds.MachineType != "" {
+		gcpConfig += fmt.Sprintf(`
+    machineType: "%s"`, creds.MachineType)
+	}
+	if creds.ImageProject != "" {
+		gcpConfig += fmt.Sprintf(`
+    imageProject: "%s"`, creds.ImageProject)
+	}
+	if creds.ImageFamily != "" {
+		gcpConfig += fmt.Sprintf(`
+    imageFamily: "%s"`, creds.ImageFamily)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: gcp
+  namespace: butler-system
+spec:
+  provider: gcp
+  credentialsRef:
+    name: gcp-credentials
+    namespace: butler-system
+  gcp:
+%s
+`, gcpConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
 // InstallCAPI installs Cluster API with the specified infrastructure providers
 func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
@@ -1298,6 +1374,9 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 	case "proxmox":
 		namespace = "capmox-system"
 		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.6.0/infrastructure-components.yaml"
+	case "gcp":
+		namespace = "capg-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.8.0/infrastructure-components.yaml"
 	default:
 		logger.Info("Unknown provider, skipping", "provider", provider)
 		return nil

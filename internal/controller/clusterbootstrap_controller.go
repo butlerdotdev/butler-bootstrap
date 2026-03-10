@@ -1196,6 +1196,8 @@ func (r *ClusterBootstrapReconciler) getDefaultVIPInterface(provider string) str
 		return "enp1s0"
 	case "proxmox":
 		return "eth0"
+	case "gcp":
+		return "ens4"
 	default:
 		return "eth0"
 	}
@@ -1267,6 +1269,16 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 			Username: string(secret.Data["username"]),
 			Password: string(secret.Data["password"]),
 		}
+	case "gcp":
+		creds.GCP = &addons.GCPCredentials{
+			ServiceAccountKey: string(secret.Data["serviceAccountKey"]),
+			ProjectID:         providerConfig.Spec.GCP.ProjectID,
+			Region:            providerConfig.Spec.GCP.Region,
+		}
+		if providerConfig.Spec.GCP.Network != "" {
+			creds.GCP.Network = providerConfig.Spec.GCP.Network
+		}
+		logger.Info("Retrieved GCP credentials", "projectID", creds.GCP.ProjectID, "region", creds.GCP.Region)
 	}
 
 	return creds, nil
@@ -1343,6 +1355,21 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 		logger.Info("Extracted Harvester credentials",
 			"namespace", creds.Harvester.Namespace,
 			"networkName", creds.Harvester.NetworkName)
+
+	case "gcp":
+		if providerConfig.Spec.GCP == nil {
+			return nil, fmt.Errorf("ProviderConfig %s has no gcp configuration", providerConfigKey)
+		}
+		creds.GCP = &addons.GCPCredentials{
+			ServiceAccountKey: string(secret.Data["serviceAccountKey"]),
+			ProjectID:         providerConfig.Spec.GCP.ProjectID,
+			Region:            providerConfig.Spec.GCP.Region,
+			Network:           providerConfig.Spec.GCP.Network,
+			Subnetwork:        providerConfig.Spec.GCP.Subnetwork,
+		}
+		logger.Info("Extracted GCP credentials",
+			"projectID", creds.GCP.ProjectID,
+			"region", creds.GCP.Region)
 
 	default:
 		logger.Info("Unknown or unsupported provider type", "provider", cb.Spec.Provider)
