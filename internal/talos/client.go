@@ -96,20 +96,12 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 	// Disable kube-proxy (Cilium handles this)
 	args = append(args, "--config-patch", `[{"op": "add", "path": "/cluster/proxy", "value": {"disabled": true}}]`)
 
-	// Set cloud platform for metadata discovery and cloud-init.
-	// Without this, Talos defaults to the metal platform which does not
-	// query cloud instance metadata services.
-	if opts.Platform != "" {
-		args = append(args, "--config-patch", fmt.Sprintf(
-			`[{"op": "add", "path": "/machine/install/platform", "value": "%s"}]`,
-			opts.Platform))
-
-		// CCM requires kubelet to start with --cloud-provider=external.
-		// Without this, kubelet registers nodes as bare metal and CCM
-		// cannot manage node lifecycle or provision LoadBalancer services.
-		args = append(args, "--config-patch",
-			`[{"op": "add", "path": "/machine/kubelet/extraArgs", "value": {"cloud-provider": "external"}}]`)
-	}
+	// Cloud platforms: Talos auto-detects the platform from the VM environment
+	// (GCP metadata service, AWS IMDS, Azure IMDS). No config patch needed.
+	// Note: --cloud-provider=external is NOT set for management clusters.
+	// It adds an "uninitialized" taint that blocks all pods until CCM runs,
+	// but management clusters don't need CCM. Tenant clusters on cloud
+	// providers get --cloud-provider=external via CAPI machine templates.
 
 	// Allow scheduling on control planes for single-node clusters
 	// This enables workloads to run on the single control plane node

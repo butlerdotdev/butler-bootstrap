@@ -756,20 +756,14 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 2.5 Cloud Controller Manager - cloud providers only.
-	// Replaces MetalLB for LoadBalancer service provisioning on cloud.
+	// 2.5 Cloud Controller Manager - skipped for management cluster bootstrap.
+	// Management clusters don't need CCM. Setting --cloud-provider=external
+	// on kubelet adds an "uninitialized" taint that blocks all pod scheduling
+	// until CCM runs, creating a deadlock. Tenant clusters on cloud providers
+	// get CCM installed by butler-controller via CAPI machine templates.
 	if cb.IsCloudProvider() {
-		if !r.isAddonInstalled(cb, "cloud-controller-manager") {
-			logger.Info("Installing Cloud Controller Manager", "provider", cb.Spec.Provider)
-			if err := r.AddonInstaller.InstallCloudControllerManager(ctx, kubeconfig, cb.Spec.Provider); err != nil {
-				logger.Error(err, "Failed to install Cloud Controller Manager — LoadBalancer services will remain Pending until CCM is installed. NodePort and port-forward still work.")
-			}
-
-			r.setAddonInstalled(cb, "cloud-controller-manager")
-			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after CCM install", "error", err)
-			}
-		}
+		r.ensureAddonsMap(cb)
+		cb.Status.AddonsInstalled["cloud-controller-manager"] = true
 	}
 
 	// 3. cert-manager - needed by Traefik and Steward webhooks
