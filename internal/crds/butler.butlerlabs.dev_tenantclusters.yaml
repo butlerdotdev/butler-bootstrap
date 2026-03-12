@@ -207,7 +207,7 @@ spec:
                     type: object
                 type: object
               controlPlane:
-                description: ControlPlane configures the Kamaji-hosted control plane.
+                description: ControlPlane configures the Steward-hosted control plane.
                 properties:
                   certSANs:
                     description: |-
@@ -218,7 +218,7 @@ spec:
                     type: array
                   dataStoreRef:
                     description: |-
-                      DataStoreRef references the Kamaji DataStore to use.
+                      DataStoreRef references the Steward DataStore to use.
                       If not specified, the default DataStore is used.
                     properties:
                       name:
@@ -238,19 +238,221 @@ spec:
                     default: 1
                     description: |-
                       Replicas is the number of API server replicas.
-                      Kamaji manages high availability automatically.
+                      Steward manages high availability automatically.
                     format: int32
                     maximum: 3
                     minimum: 1
                     type: integer
+                  resources:
+                    description: |-
+                      Resources overrides platform-level control plane resource defaults from ButlerConfig.
+                      Per-component: if a component is set here, it fully replaces the ButlerConfig default
+                      for that component. Components not set here inherit from ButlerConfig.
+                    properties:
+                      apiServer:
+                        description: APIServer resource requirements.
+                        properties:
+                          limits:
+                            description: Limits describes the maximum resources allowed.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU resource (e.g., "100m", "1", "2").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory resource (e.g., "128Mi", "1Gi").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          requests:
+                            description: Requests describes the minimum resources
+                              required.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU resource (e.g., "100m", "1", "2").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory resource (e.g., "128Mi", "1Gi").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                        type: object
+                      controllerManager:
+                        description: ControllerManager resource requirements.
+                        properties:
+                          limits:
+                            description: Limits describes the maximum resources allowed.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU resource (e.g., "100m", "1", "2").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory resource (e.g., "128Mi", "1Gi").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          requests:
+                            description: Requests describes the minimum resources
+                              required.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU resource (e.g., "100m", "1", "2").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory resource (e.g., "128Mi", "1Gi").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                        type: object
+                      scheduler:
+                        description: Scheduler resource requirements.
+                        properties:
+                          limits:
+                            description: Limits describes the maximum resources allowed.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU resource (e.g., "100m", "1", "2").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory resource (e.g., "128Mi", "1Gi").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          requests:
+                            description: Requests describes the minimum resources
+                              required.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU resource (e.g., "100m", "1", "2").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory resource (e.g., "128Mi", "1Gi").
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                        type: object
+                    type: object
                   serviceType:
-                    default: LoadBalancer
-                    description: ServiceType for the control plane endpoint.
+                    description: |-
+                      ServiceType for the control plane endpoint.
+                      If not specified, inherits from ButlerConfig.spec.controlPlaneExposure.mode.
+                      Only set this to override the platform-level setting for this specific cluster.
                     enum:
                     - LoadBalancer
                     - NodePort
                     - ClusterIP
                     type: string
+                type: object
+              infrastructureOverride:
+                description: |-
+                  InfrastructureOverride allows overriding provider-specific settings.
+                  These take precedence over ProviderConfig defaults.
+                properties:
+                  gcp:
+                    description: GCP contains GCP-specific overrides.
+                    properties:
+                      image:
+                        description: Image overrides the default image.
+                        type: string
+                      imageFamily:
+                        description: ImageFamily overrides the default image family.
+                        type: string
+                      machineType:
+                        description: MachineType overrides the default GCE machine
+                          type.
+                        type: string
+                      subnetwork:
+                        description: Subnetwork overrides the default subnetwork.
+                        type: string
+                      zone:
+                        description: Zone overrides the default GCP compute zone.
+                        type: string
+                    type: object
+                  harvester:
+                    description: Harvester contains Harvester-specific overrides.
+                    properties:
+                      imageName:
+                        description: 'ImageName is the VM image to use (format: namespace/name).'
+                        type: string
+                      namespace:
+                        description: Namespace is the Harvester namespace for VMs.
+                        type: string
+                      networkName:
+                        description: 'NetworkName is the Harvester network to use
+                          (format: namespace/name).'
+                        type: string
+                    type: object
+                  nutanix:
+                    description: Nutanix contains Nutanix-specific overrides.
+                    properties:
+                      clusterUUID:
+                        description: ClusterUUID is the Nutanix cluster UUID.
+                        type: string
+                      imageUUID:
+                        description: ImageUUID is the Nutanix image UUID.
+                        type: string
+                      storageContainerUUID:
+                        description: StorageContainerUUID is the Nutanix storage container
+                          UUID.
+                        type: string
+                      subnetUUID:
+                        description: SubnetUUID is the Nutanix subnet UUID.
+                        type: string
+                    type: object
+                  proxmox:
+                    description: Proxmox contains Proxmox-specific overrides.
+                    properties:
+                      node:
+                        description: Node is the Proxmox node to deploy VMs on.
+                        type: string
+                      storage:
+                        description: Storage is the Proxmox storage to use.
+                        type: string
+                      templateID:
+                        description: TemplateID is the VM template ID.
+                        type: integer
+                    type: object
                 type: object
               kubernetesVersion:
                 description: KubernetesVersion is the target Kubernetes version.
@@ -271,9 +473,17 @@ spec:
               networking:
                 description: Networking configures cluster networking.
                 properties:
+                  lbPoolSize:
+                    description: |-
+                      LBPoolSize overrides the default load balancer pool size from the provider.
+                      Only used when the provider has network.mode=ipam.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   loadBalancerPool:
-                    description: LoadBalancerPool defines the IP pool for LoadBalancer
-                      services.
+                    description: |-
+                      LoadBalancerPool defines the IP pool for LoadBalancer services.
+                      When IPAM is active, this is populated automatically from IPAllocation.
                     properties:
                       end:
                         description: End is the last IP in the pool.
@@ -298,10 +508,16 @@ spec:
                 description: |-
                   ProviderConfigRef references the ProviderConfig for infrastructure.
                   If not specified, defaults are used (Team's or platform's).
+                  Namespace defaults to butler-system if not specified.
                 properties:
                   name:
-                    description: Name is the name of the resource.
+                    description: Name is the name of the ProviderConfig resource.
                     minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the ProviderConfig resource.
+                      If not specified, the namespace of the referencing resource is used.
                     type: string
                 required:
                 - name
@@ -355,12 +571,47 @@ spec:
                               ImageRef references a specific image to use.
                               Overrides Type and Version if specified.
                             type: string
+                          schematicID:
+                            description: |-
+                              SchematicID references a Butler Image Factory schematic.
+                              When set with AutoSync enabled, Butler automatically syncs the
+                              factory-built image to the target provider before VM creation.
+                            type: string
+                          sshAuthorizedKey:
+                            description: |-
+                              SSHAuthorizedKey overrides the platform default SSH public key for this cluster's workers.
+                              Only applies to non-Talos OS types (Flatcar, Bottlerocket).
+                              If empty, falls back to ButlerConfig.spec.sshAuthorizedKey.
+                            type: string
+                          talos:
+                            description: |-
+                              Talos provides Talos-specific worker node configuration.
+                              Required when type is "talos".
+                            properties:
+                              installDisk:
+                                default: /dev/vda
+                                description: InstallDisk is the disk where Talos will
+                                  be installed.
+                                type: string
+                              installerImage:
+                                description: |-
+                                  InstallerImage is the Talos installer image
+                                  (e.g., factory.talos.dev/installer/<schematic>:v1.9.3).
+                                type: string
+                              version:
+                                default: v1.9.3
+                                description: Version is the Talos version.
+                                type: string
+                            type: object
                           type:
                             default: rocky
                             description: Type is the OS type.
                             enum:
                             - rocky
                             - flatcar
+                            - talos
+                            - kairos
+                            - bottlerocket
                             type: string
                           version:
                             default: "9.5"
@@ -375,6 +626,54 @@ spec:
                     type: integer
                 required:
                 - replicas
+                type: object
+              workspaces:
+                description: |-
+                  Workspaces configures cloud development environments on this cluster.
+                  When enabled, users can create Workspace resources that provision pods
+                  with SSH access in the tenant cluster's "workspaces" namespace.
+                properties:
+                  autoDeleteAfter:
+                    default: 720h
+                    description: |-
+                      AutoDeleteAfter deletes stopped workspaces after this duration.
+                      Prevents PVC sprawl. 0 means never auto-delete.
+                    type: string
+                  defaultImage:
+                    default: ghcr.io/butlerdotdev/workspace-base:latest
+                    description: DefaultImage is the default workspace image if user
+                      doesn't specify one.
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enabled allows workspace creation on this cluster.
+                    type: boolean
+                  maxWorkspaces:
+                    default: 20
+                    description: MaxWorkspaces per cluster. 0 means unlimited.
+                    format: int32
+                    type: integer
+                  resourceQuota:
+                    description: ResourceQuota for the workspaces namespace in the
+                      tenant cluster.
+                    properties:
+                      maxCPU:
+                        default: "16"
+                        description: MaxCPU total across all workspaces in this cluster.
+                        type: string
+                      maxMemory:
+                        default: 32Gi
+                        description: MaxMemory total across all workspaces in this
+                          cluster.
+                        type: string
+                      maxStorage:
+                        default: 500Gi
+                        description: MaxStorage total across all workspace PVCs in
+                          this cluster.
+                        type: string
+                    type: object
+                required:
+                - enabled
                 type: object
             required:
             - kubernetesVersion
@@ -446,6 +745,28 @@ spec:
               controlPlaneEndpoint:
                 description: ControlPlaneEndpoint is the API server endpoint.
                 type: string
+              imageSyncRef:
+                description: ImageSyncRef references the ImageSync resource for this
+                  cluster's OS image.
+                properties:
+                  name:
+                    description: Name is the name of the resource.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              ipAllocationRef:
+                description: IPAllocationRef references the node IP allocation from
+                  IPAM.
+                properties:
+                  name:
+                    description: Name is the name of the resource.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               kubeconfigSecretRef:
                 description: KubeconfigSecretRef references the Secret containing
                   the kubeconfig.
@@ -461,6 +782,17 @@ spec:
                 description: LastTransitionTime is when the phase last changed.
                 format: date-time
                 type: string
+              lbAllocationRef:
+                description: LBAllocationRef references the load balancer IP allocation
+                  from IPAM.
+                properties:
+                  name:
+                    description: Name is the name of the resource.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the last observed generation.
                 format: int64
@@ -540,9 +872,17 @@ spec:
                 - Failed
                 type: string
               tenantNamespace:
-                description: TenantNamespace is the namespace containing CAPI/Kamaji
+                description: TenantNamespace is the namespace containing CAPI/Steward
                   resources.
                 type: string
+              workerNodesDesired:
+                description: WorkerNodesDesired is the desired count of worker nodes
+                format: int32
+                type: integer
+              workerNodesReady:
+                description: WorkerNodesReady is the count of ready worker nodes
+                format: int32
+                type: integer
             type: object
         type: object
     served: true

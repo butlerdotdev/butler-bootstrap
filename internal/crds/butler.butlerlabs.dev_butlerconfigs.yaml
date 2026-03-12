@@ -21,6 +21,10 @@ spec:
       jsonPath: .spec.multiTenancy.mode
       name: Mode
       type: string
+    - description: Git provider
+      jsonPath: .spec.gitProvider.type
+      name: Git
+      type: string
     - description: Number of teams
       jsonPath: .status.teamCount
       name: Teams
@@ -60,6 +64,55 @@ spec:
           spec:
             description: ButlerConfigSpec defines the desired state of ButlerConfig.
             properties:
+              controlPlaneExposure:
+                description: |-
+                  ControlPlaneExposure configures how tenant control planes are exposed.
+                  This is a platform-level setting populated from ClusterBootstrap during
+                  initial setup and inherited by all TenantClusters.
+                properties:
+                  controllerType:
+                    description: |-
+                      ControllerType specifies the ingress controller type for automatic TLS passthrough.
+                      Used when Mode is Ingress. Supported values:
+                      - "haproxy": Uses haproxy.org/ssl-passthrough annotation
+                      - "nginx": Uses nginx.ingress.kubernetes.io/ssl-passthrough annotation
+                      - "traefik": Creates IngressRouteTCP instead of standard Ingress
+                      - "generic": No automatic annotations, use custom annotations in Steward config
+                    enum:
+                    - haproxy
+                    - nginx
+                    - traefik
+                    - generic
+                    type: string
+                  gatewayRef:
+                    description: |-
+                      GatewayRef references the Gateway resource when Mode is Gateway.
+                      Format: "namespace/name"
+                    type: string
+                  hostname:
+                    description: |-
+                      Hostname is the wildcard domain for tenant API servers.
+                      Required when Mode is Ingress or Gateway.
+                      Example: "*.k8s.platform.example.com"
+                      Tenant clusters get: "{cluster}.{namespace}.k8s.platform.example.com"
+                    type: string
+                  ingressClassName:
+                    description: IngressClassName specifies the Ingress class when
+                      Mode is Ingress.
+                    type: string
+                  mode:
+                    default: LoadBalancer
+                    description: |-
+                      Mode determines how tenant API servers are exposed.
+                      LoadBalancer: 1 IP per tenant, direct access (default)
+                      Ingress: L7 proxy via Ingress controller with TLS passthrough, shared IP
+                      Gateway: L4/L7 via Gateway API TLSRoute, shared IP
+                    enum:
+                    - LoadBalancer
+                    - Ingress
+                    - Gateway
+                    type: string
+                type: object
               defaultAddonVersions:
                 description: |-
                   DefaultAddonVersions specifies the default versions for addons.
@@ -83,6 +136,134 @@ spec:
                   traefik:
                     description: Traefik version.
                     type: string
+                type: object
+              defaultControlPlaneResources:
+                description: |-
+                  DefaultControlPlaneResources configures default resource allocations for
+                  tenant control plane components (apiserver, controller-manager, scheduler).
+                  Applied to new TenantClusters when they don't specify per-cluster overrides.
+                  If not set, pods run with no resource requests (BestEffort QoS).
+                properties:
+                  apiServer:
+                    description: APIServer resource requirements.
+                    properties:
+                      limits:
+                        description: Limits describes the maximum resources allowed.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: CPU resource (e.g., "100m", "1", "2").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: Memory resource (e.g., "128Mi", "1Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      requests:
+                        description: Requests describes the minimum resources required.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: CPU resource (e.g., "100m", "1", "2").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: Memory resource (e.g., "128Mi", "1Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        type: object
+                    type: object
+                  controllerManager:
+                    description: ControllerManager resource requirements.
+                    properties:
+                      limits:
+                        description: Limits describes the maximum resources allowed.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: CPU resource (e.g., "100m", "1", "2").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: Memory resource (e.g., "128Mi", "1Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      requests:
+                        description: Requests describes the minimum resources required.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: CPU resource (e.g., "100m", "1", "2").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: Memory resource (e.g., "128Mi", "1Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        type: object
+                    type: object
+                  scheduler:
+                    description: Scheduler resource requirements.
+                    properties:
+                      limits:
+                        description: Limits describes the maximum resources allowed.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: CPU resource (e.g., "100m", "1", "2").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: Memory resource (e.g., "128Mi", "1Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      requests:
+                        description: Requests describes the minimum resources required.
+                        properties:
+                          cpu:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: CPU resource (e.g., "100m", "1", "2").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          memory:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: Memory resource (e.g., "128Mi", "1Gi").
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                        type: object
+                    type: object
                 type: object
               defaultNamespace:
                 default: butler-tenants
@@ -143,6 +324,95 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+              gitProvider:
+                description: |-
+                  GitProvider configures the default Git provider for GitOps operations.
+                  This enables features like exporting clusters to GitOps, enabling Flux
+                  on clusters, and managing addons via Git repositories.
+                properties:
+                  organization:
+                    description: |-
+                      Organization is the default organization/group for repositories.
+                      When set, repository listings will be scoped to this org.
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef references the Secret containing credentials.
+                      Required keys depend on provider type:
+                      - GitHub: "token" (Personal Access Token with repo scope)
+                      - GitLab: "token" (Personal Access Token with api scope)
+                      - Bitbucket: "username" and "app-password"
+                    properties:
+                      name:
+                        description: Name is the name of the resource.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  type:
+                    description: Type is the Git provider type.
+                    enum:
+                    - github
+                    - gitlab
+                    - bitbucket
+                    type: string
+                  url:
+                    default: https://api.github.com
+                    description: |-
+                      URL is the Git provider API URL.
+                      For GitHub: https://api.github.com (or https://github.example.com/api/v3 for enterprise)
+                      For GitLab: https://gitlab.com (or self-hosted URL)
+                    type: string
+                required:
+                - secretRef
+                - type
+                type: object
+              imageFactory:
+                description: |-
+                  ImageFactory configures the Butler Image Factory connection.
+                  Required for automatic image syncing to infrastructure providers.
+                properties:
+                  autoSync:
+                    default: true
+                    description: |-
+                      AutoSync enables automatic image syncing when a TenantCluster references
+                      an image not yet available on the target provider.
+                    type: boolean
+                  credentialsRef:
+                    description: |-
+                      CredentialsRef references the Secret containing the factory API key.
+                      The Secret must contain a key named "apiKey".
+                    properties:
+                      key:
+                        description: |-
+                          Key is the key within the Secret to reference.
+                          If not specified, the entire Secret data is used.
+                        type: string
+                      name:
+                        description: Name is the name of the Secret.
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the namespace of the Secret.
+                          If not specified, the namespace of the referencing resource is used.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  defaultSchematicID:
+                    description: |-
+                      DefaultSchematicID is the default schematic used when TenantClusters
+                      don't specify one. Content-addressable SHA-256 hex string.
+                    type: string
+                  url:
+                    description: URL is the base URL of the Image Factory API.
+                    pattern: ^https?://
+                    type: string
+                required:
+                - url
+                type: object
               multiTenancy:
                 description: MultiTenancy configures how multi-tenancy is handled.
                 properties:
@@ -155,6 +425,107 @@ spec:
                     - Disabled
                     type: string
                 type: object
+              observability:
+                description: Observability configures platform-level observability
+                  (pipeline, collection defaults).
+                properties:
+                  collection:
+                    description: Collection configures default collection settings
+                      for tenant clusters.
+                    properties:
+                      autoEnroll:
+                        description: |-
+                          AutoEnroll controls which observability agents are automatically installed
+                          on new tenant clusters when they reach Ready phase.
+                        properties:
+                          otelCollector:
+                            description: |-
+                              OtelCollector enables automatic installation of the OpenTelemetry Collector.
+                              Requires pipeline.traceEndpoint to be configured.
+                            type: boolean
+                          prometheus:
+                            description: |-
+                              Prometheus enables automatic installation of the Prometheus monitoring stack.
+                              Requires pipeline.metricEndpoint to be configured.
+                            type: boolean
+                          vectorAgent:
+                            description: |-
+                              VectorAgent enables automatic installation of the Vector log/metric collector.
+                              Requires pipeline.logEndpoint to be configured.
+                            type: boolean
+                        type: object
+                      logs:
+                        description: Logs configures default log collection settings.
+                        properties:
+                          journald:
+                            description: Journald enables collection of systemd journal
+                              logs.
+                            type: boolean
+                          kubernetesEvents:
+                            description: KubernetesEvents enables collection of Kubernetes
+                              events.
+                            type: boolean
+                          podLogs:
+                            description: PodLogs enables collection of container stdout/stderr
+                              logs.
+                            type: boolean
+                        type: object
+                      metrics:
+                        description: Metrics configures default metric collection
+                          settings.
+                        properties:
+                          enabled:
+                            description: Enabled controls whether metrics collection
+                              is enabled by default.
+                            type: boolean
+                          retention:
+                            description: Retention is the Prometheus data retention
+                              period (e.g., "15d").
+                            type: string
+                        type: object
+                    type: object
+                  pipeline:
+                    description: Pipeline configures the centralized observability
+                      pipeline cluster.
+                    properties:
+                      clusterRef:
+                        description: ClusterRef references the TenantCluster serving
+                          as the observability pipeline.
+                        properties:
+                          name:
+                            description: Name is the name of the resource.
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace of the resource.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        type: object
+                      logEndpoint:
+                        description: |-
+                          LogEndpoint is the Vector aggregator ingestion URL.
+                          Example: "http://vector-aggregator.vector.svc:9000"
+                        type: string
+                      metricEndpoint:
+                        description: MetricEndpoint is the optional remote-write endpoint
+                          for metrics.
+                        type: string
+                      traceEndpoint:
+                        description: |-
+                          TraceEndpoint is the optional OTLP endpoint for traces.
+                          Example: "tempo.tracing.svc:4317"
+                        type: string
+                    type: object
+                type: object
+              sshAuthorizedKey:
+                description: |-
+                  SSHAuthorizedKey is the default SSH public key injected into worker nodes
+                  for platform-level diagnostic access. Applied to non-Talos workers only.
+                  Can be overridden per-cluster via TenantCluster.spec.workers.machineTemplate.os.sshAuthorizedKey.
+                type: string
             type: object
           status:
             description: ButlerConfigStatus defines the observed state of ButlerConfig.
@@ -224,10 +595,59 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              controlPlaneExposureMode:
+                description: ControlPlaneExposureMode is the active control plane
+                  exposure mode.
+                enum:
+                - LoadBalancer
+                - Ingress
+                - Gateway
+                type: string
+              gitProvider:
+                description: GitProvider shows the status of the configured Git provider.
+                properties:
+                  connected:
+                    description: Connected indicates whether the provider credentials
+                      are valid.
+                    type: boolean
+                  lastValidated:
+                    description: LastValidated is when the credentials were last validated.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message provides additional status information.
+                    type: string
+                  username:
+                    description: Username is the authenticated username (from token
+                      validation).
+                    type: string
+                type: object
+              observability:
+                description: Observability shows the status of platform observability.
+                properties:
+                  enrolledCount:
+                    description: EnrolledCount is the number of tenant clusters with
+                      observability agents installed.
+                    format: int32
+                    type: integer
+                  pipelineReady:
+                    description: PipelineReady indicates whether the observability
+                      pipeline cluster is healthy.
+                    type: boolean
+                  totalCount:
+                    description: TotalCount is the total number of tenant clusters.
+                    format: int32
+                    type: integer
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the last observed generation.
                 format: int64
                 type: integer
+              tcpProxyRequired:
+                description: |-
+                  TCPProxyRequired indicates if tcp-proxy is auto-enabled for tenants.
+                  True when ControlPlaneExposureMode is Ingress or Gateway.
+                type: boolean
               teamCount:
                 description: TeamCount is the current number of Teams.
                 format: int32

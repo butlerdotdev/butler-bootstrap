@@ -611,7 +611,8 @@ func (r *ClusterBootstrapReconciler) reconcileBootstrappingCluster(ctx context.C
 			// Retry on transient errors (node still booting)
 			if strings.Contains(err.Error(), "connection refused") ||
 				strings.Contains(err.Error(), "connection reset") ||
-				strings.Contains(err.Error(), "i/o timeout") {
+				strings.Contains(err.Error(), "i/o timeout") ||
+				strings.Contains(err.Error(), "bootstrap is not available yet") {
 				logger.Info("Bootstrap failed, node may still be starting, retrying", "error", err)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
@@ -833,9 +834,14 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 6. Traefik ingress - after MetalLB so it can get LoadBalancer IP
-	if addons.Ingress == nil || isAddonEnabled(addons.Ingress.Enabled) {
-		if !r.isAddonInstalled(cb, "traefik") {
+	// 6. Traefik ingress - after MetalLB so it can get LoadBalancer IP.
+	// Cloud providers skip Traefik because there is no MetalLB or CCM to
+	// allocate LoadBalancer IPs on the management cluster. Traefik's LB
+	// Service stays <pending> and Helm --wait times out.
+	if !r.isAddonInstalled(cb, "traefik") {
+		if cb.IsCloudProvider() {
+			logger.Info("Skipping Traefik (cloud provider has no MetalLB/CCM for LoadBalancer)")
+		} else if addons.Ingress == nil || isAddonEnabled(addons.Ingress.Enabled) {
 			logger.Info("Installing Traefik")
 			version := ""
 			if addons.Ingress != nil && addons.Ingress.Version != "" {
@@ -847,11 +853,12 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
 
-			r.setAddonInstalled(cb, "traefik")
 			logger.Info("Traefik installed successfully")
-			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Traefik install", "error", err)
-			}
+		}
+
+		r.setAddonInstalled(cb, "traefik")
+		if err := r.Status().Update(ctx, cb); err != nil {
+			logger.Info("Failed to update status after Traefik step", "error", err)
 		}
 	}
 
@@ -972,7 +979,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		if !r.isAddonInstalled(cb, "butler-crds") {
 			logger.Info("Installing Butler CRDs")
 
-			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig, "0.1.0"); err != nil {
+			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig, ""); err != nil {
 				logger.Error(err, "Failed to install Butler CRDs")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}

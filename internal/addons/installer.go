@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
+	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
 
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -907,7 +908,8 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 	return nil
 }
 
-// InstallButlerCRDs installs Butler platform CRDs via Helm chart
+// InstallButlerCRDs installs Butler platform CRDs via Helm chart and overlays
+// embedded CRDs to ensure cloud provider fields are present.
 func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Installing Butler platform CRDs", "version", version)
@@ -923,7 +925,7 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 	}
 
 	if version == "" {
-		version = "0.1.0"
+		version = "0.6.0"
 	}
 
 	args := []string{
@@ -938,6 +940,12 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 
 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
 		return fmt.Errorf("failed to install butler-crds: %w", err)
+	}
+
+	// Overlay embedded CRDs to ensure cloud provider fields and any
+	// dev-branch CRD changes are present on the target cluster.
+	if err := i.applyEmbeddedCRDs(ctx, kubeconfigPath); err != nil {
+		logger.Info("Failed to overlay embedded CRDs (non-fatal)", "error", err)
 	}
 
 	// Wait for all Butler CRDs to be established (discover dynamically)
@@ -1018,6 +1026,51 @@ func (i *Installer) waitForButlerCRDs(ctx context.Context, kubeconfigPath string
 		if err := i.runKubectl(ctx, kubeconfigPath, args...); err != nil {
 			logger.Info("CRD wait timeout (may already be ready)", "crd", crd)
 		}
+	}
+
+	return nil
+}
+
+// applyEmbeddedCRDs applies the embedded CRD YAML files to the target cluster.
+// This overlays any fields that are present in the build but not yet released
+// in the butler-crds Helm chart (e.g., cloud provider fields on ProviderConfig).
+func (i *Installer) applyEmbeddedCRDs(ctx context.Context, kubeconfigPath string) error {
+	logger := log.FromContext(ctx)
+
+	entries, err := crds.PlatformCRDs.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("failed to read embedded CRDs: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+
+		data, err := crds.PlatformCRDs.ReadFile(entry.Name())
+		if err != nil {
+			logger.Info("Failed to read embedded CRD", "file", entry.Name(), "error", err)
+			continue
+		}
+
+		tmpFile, err := os.CreateTemp("", "crd-*.yaml")
+		if err != nil {
+			return fmt.Errorf("failed to create temp file: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+
+		if _, err := tmpFile.Write(data); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to write CRD temp file: %w", err)
+		}
+		tmpFile.Close()
+
+		logger.Info("Applying embedded CRD", "file", entry.Name())
+		if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", tmpPath); err != nil {
+			logger.Info("Failed to apply embedded CRD (non-fatal)", "file", entry.Name(), "error", err)
+		}
+		os.Remove(tmpPath)
 	}
 
 	return nil
@@ -1494,9 +1547,13 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", stewardURL); err != nil {
 		return fmt.Errorf("failed to install Steward CAPI provider: %w", err)
 	}
-	// Install infrastructure provider manually with credentials
+	// Install infrastructure provider manually with credentials.
+	// Non-fatal: CAPI infra providers (CAPG, CAPA, CAPZ) have webhook CRDs with
+	// placeholder caBundle that cert-manager's ca-injector must populate. If the
+	// CA hasn't propagated yet, kubectl apply rejects the invalid PEM. The
+	// provider can be installed post-bootstrap; core + capi-steward are sufficient.
 	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, creds); err != nil {
-		return fmt.Errorf("failed to install %s provider: %w", mgmtProvider, err)
+		logger.Info("Infrastructure provider install failed (non-fatal, can be installed post-bootstrap)", "provider", mgmtProvider, "error", err)
 	}
 
 	// Install any additional providers
@@ -1590,6 +1647,11 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 	if provider == "nutanix" && creds != nil && creds.Nutanix != nil {
 		manifest = i.substituteNutanixCredentials(manifest, creds.Nutanix)
 	}
+	if provider == "gcp" && creds != nil && creds.GCP != nil {
+		manifest = i.substituteGCPVariables(manifest, creds.GCP)
+	}
+	// For any remaining ${VAR:=default} patterns, substitute the default value
+	manifest = substituteDefaults(manifest)
 
 	// Write processed manifest to temp file
 	tmpFile, err := os.CreateTemp("", "provider-*.yaml")
@@ -1651,6 +1713,41 @@ func (i *Installer) substituteNutanixCredentials(manifest string, creds *Nutanix
 		manifest = strings.ReplaceAll(manifest, placeholder, value)
 	}
 
+	return manifest
+}
+
+// substituteGCPVariables replaces CAPG template variables with actual values.
+// The CAPG infrastructure-components.yaml uses ${GCP_B64ENCODED_CREDENTIALS}
+// for the credentials secret and ${VAR:=default} patterns for feature gates.
+func (i *Installer) substituteGCPVariables(manifest string, creds *GCPCredentials) string {
+	b64Creds := base64.StdEncoding.EncodeToString([]byte(creds.ServiceAccountKey))
+	manifest = strings.ReplaceAll(manifest, "${GCP_B64ENCODED_CREDENTIALS}", b64Creds)
+	return manifest
+}
+
+// substituteDefaults replaces remaining ${VAR:=default} patterns with their default values.
+// This handles shell-style variable substitution patterns commonly found in CAPI manifests.
+func substituteDefaults(manifest string) string {
+	for {
+		idx := strings.Index(manifest, "${")
+		if idx == -1 {
+			break
+		}
+		end := strings.Index(manifest[idx:], "}")
+		if end == -1 {
+			break
+		}
+		end += idx
+		expr := manifest[idx+2 : end] // contents between ${ and }
+		// Handle ${VAR:=default} pattern
+		if colonIdx := strings.Index(expr, ":="); colonIdx != -1 {
+			defaultVal := expr[colonIdx+2:]
+			manifest = manifest[:idx] + defaultVal + manifest[end+1:]
+			continue
+		}
+		// Skip patterns we don't understand (move past to avoid infinite loop)
+		break
+	}
 	return manifest
 }
 
@@ -1900,7 +1997,7 @@ spec:
 func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error) {
 	logger := log.FromContext(ctx)
 
-	version := "0.1.0"
+	version := "0.4.1"
 	if spec != nil && spec.Version != "" {
 		version = spec.Version
 	}
@@ -1915,6 +2012,13 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 
 	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "butler-system"); err != nil {
 		return "", fmt.Errorf("failed to prepare butler-system namespace: %w", err)
+	}
+
+	// The butler-console chart has RBAC resources in steward-system namespace
+	// (for Steward deployment restart during cert rotation). Ensure the
+	// namespace exists so Helm doesn't fail creating the Role/RoleBinding.
+	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "steward-system"); err != nil {
+		return "", fmt.Errorf("failed to prepare steward-system namespace: %w", err)
 	}
 
 	// Build helm values

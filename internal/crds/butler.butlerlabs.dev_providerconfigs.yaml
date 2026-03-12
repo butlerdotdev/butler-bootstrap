@@ -21,6 +21,14 @@ spec:
       jsonPath: .spec.provider
       name: Provider
       type: string
+    - description: Visibility scope
+      jsonPath: .spec.scope.type
+      name: Scope
+      type: string
+    - description: Provider ready
+      jsonPath: .status.ready
+      name: Ready
+      type: boolean
     - description: Configuration validated
       jsonPath: .status.validated
       name: Validated
@@ -56,6 +64,54 @@ spec:
           spec:
             description: ProviderConfigSpec defines the desired state of ProviderConfig.
             properties:
+              aws:
+                description: |-
+                  AWS contains AWS-specific configuration.
+                  Required when provider is "aws".
+                properties:
+                  region:
+                    description: Region is the AWS region.
+                    type: string
+                  securityGroupIDs:
+                    description: SecurityGroupIDs are the security group identifiers.
+                    items:
+                      type: string
+                    type: array
+                  subnetIDs:
+                    description: SubnetIDs are the subnet identifiers for VM placement.
+                    items:
+                      type: string
+                    type: array
+                  vpcID:
+                    description: VPCID is the VPC identifier.
+                    type: string
+                required:
+                - region
+                type: object
+              azure:
+                description: |-
+                  Azure contains Azure-specific configuration.
+                  Required when provider is "azure".
+                properties:
+                  location:
+                    description: Location is the Azure region.
+                    type: string
+                  resourceGroup:
+                    description: ResourceGroup is the Azure resource group.
+                    type: string
+                  subnetName:
+                    description: SubnetName is the subnet within the VNet.
+                    type: string
+                  subscriptionID:
+                    description: SubscriptionID is the Azure subscription ID.
+                    type: string
+                  vnetName:
+                    description: VNetName is the Azure Virtual Network name.
+                    type: string
+                required:
+                - resourceGroup
+                - subscriptionID
+                type: object
               credentialsRef:
                 description: |-
                   CredentialsRef references the Secret containing provider credentials.
@@ -63,6 +119,7 @@ spec:
                   - harvester: "kubeconfig" (Harvester kubeconfig)
                   - nutanix: "username", "password"
                   - proxmox: "username", "password" or "token"
+                  - gcp: "serviceAccountKey" (JSON service account key)
                 properties:
                   key:
                     description: |-
@@ -80,6 +137,60 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              gcp:
+                description: |-
+                  GCP contains GCP-specific configuration.
+                  Required when provider is "gcp".
+                properties:
+                  image:
+                    description: |-
+                      Image is the specific image name to use.
+                      Takes precedence over ImageFamily.
+                    type: string
+                  imageFamily:
+                    description: |-
+                      ImageFamily is the image family to use (e.g., "ubuntu-2204-lts").
+                      Ignored if Image is specified.
+                    type: string
+                  imageProject:
+                    description: ImageProject is the GCP project containing the source
+                      image (e.g., "ubuntu-os-cloud").
+                    type: string
+                  machineType:
+                    description: MachineType is the default GCE machine type (e.g.,
+                      "n2-standard-4").
+                    type: string
+                  network:
+                    description: Network is the VPC network name.
+                    type: string
+                  projectID:
+                    description: ProjectID is the GCP project identifier.
+                    type: string
+                  region:
+                    description: Region is the GCP region (e.g., "us-central1").
+                    type: string
+                  serviceAccount:
+                    description: ServiceAccount is the GCE service account email for
+                      VM instances.
+                    type: string
+                  subnetwork:
+                    description: Subnetwork is the subnetwork name.
+                    type: string
+                  tags:
+                    description: Tags are network tags applied to VM instances for
+                      firewall rules.
+                    items:
+                      type: string
+                    type: array
+                  zone:
+                    description: |-
+                      Zone is the GCP compute zone (e.g., "us-central1-a").
+                      If not specified, defaults to "{region}-a".
+                    type: string
+                required:
+                - projectID
+                - region
                 type: object
               harvester:
                 description: |-
@@ -111,6 +222,123 @@ spec:
                     type: string
                 required:
                 - networkName
+                type: object
+              limits:
+                description: Limits defines resource limits enforced per-team on this
+                  provider.
+                properties:
+                  maxClustersPerTeam:
+                    description: MaxClustersPerTeam limits the number of clusters
+                      per team.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxNodesPerTeam:
+                    description: MaxNodesPerTeam limits the total nodes per team.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+              network:
+                description: Network configures IPAM and network settings for this
+                  provider.
+                properties:
+                  dnsServers:
+                    description: DNSServers are the DNS server addresses.
+                    items:
+                      type: string
+                    type: array
+                  gateway:
+                    description: Gateway is the network gateway address.
+                    type: string
+                  loadBalancer:
+                    description: LoadBalancer configures load balancer IP allocation
+                      defaults.
+                    properties:
+                      allocationMode:
+                        default: static
+                        description: |-
+                          AllocationMode controls how LB IPs are allocated to tenants.
+                          "static" pre-allocates a fixed block (DefaultPoolSize IPs).
+                          "elastic" starts small and grows/shrinks based on usage.
+                        enum:
+                        - static
+                        - elastic
+                        type: string
+                      defaultPoolSize:
+                        default: 8
+                        description: DefaultPoolSize is the default number of LB IPs
+                          per tenant in static mode.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      growthIncrement:
+                        default: 2
+                        description: GrowthIncrement is the number of IPs added per
+                          expansion in elastic mode.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      initialPoolSize:
+                        default: 2
+                        description: InitialPoolSize is the number of LB IPs initially
+                          allocated in elastic mode.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  mode:
+                    default: cloud
+                    description: |-
+                      Mode determines how IP addresses are managed.
+                      "ipam" uses NetworkPool-based automated allocation.
+                      "cloud" relies on the cloud provider's native networking.
+                    enum:
+                    - ipam
+                    - cloud
+                    type: string
+                  poolRefs:
+                    description: |-
+                      PoolRefs references NetworkPools for IPAM allocation, ordered by priority.
+                      Required when mode is "ipam". Allocator tries first pool, falls back to next if exhausted.
+                    items:
+                      description: PoolReference references a NetworkPool with a priority.
+                      properties:
+                        name:
+                          description: Name is the name of the NetworkPool.
+                          type: string
+                        priority:
+                          default: 0
+                          description: |-
+                            Priority determines allocation order (lower = higher priority).
+                            Pools at the same priority are tried in list order.
+                          format: int32
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  quotaPerTenant:
+                    description: QuotaPerTenant defines per-tenant network resource
+                      quotas.
+                    properties:
+                      maxLoadBalancerIPs:
+                        description: MaxLoadBalancerIPs limits the number of LB IPs
+                          per tenant.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxNodeIPs:
+                        description: MaxNodeIPs limits the number of node IPs per
+                          tenant.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  subnet:
+                    description: Subnet is the network name for VM placement (e.g.,
+                      "VM Network - VLAN 40").
+                    type: string
                 type: object
               nutanix:
                 description: |-
@@ -156,6 +384,9 @@ spec:
                 - harvester
                 - nutanix
                 - proxmox
+                - azure
+                - aws
+                - gcp
                 type: string
               proxmox:
                 description: |-
@@ -206,6 +437,32 @@ spec:
                 - nodes
                 - storage
                 type: object
+              scope:
+                description: |-
+                  Scope defines the visibility of this ProviderConfig.
+                  Platform-scoped providers are available to all teams.
+                  Team-scoped providers are restricted to a specific team.
+                properties:
+                  teamRef:
+                    description: |-
+                      TeamRef references the Team when type is "team".
+                      Required when type is "team".
+                    properties:
+                      name:
+                        description: Name is the name of the resource.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  type:
+                    default: platform
+                    description: Type is the scope type.
+                    enum:
+                    - platform
+                    - team
+                    type: string
+                type: object
             required:
             - credentialsRef
             - provider
@@ -213,6 +470,20 @@ spec:
           status:
             description: ProviderConfigStatus defines the observed state of ProviderConfig.
             properties:
+              capacity:
+                description: Capacity reports the available capacity of this provider.
+                properties:
+                  availableIPs:
+                    description: AvailableIPs is the number of available IPs across
+                      all pools.
+                    format: int32
+                    type: integer
+                  estimatedTenants:
+                    description: EstimatedTenants is the estimated number of tenants
+                      that can be provisioned.
+                    format: int32
+                    type: integer
+                type: object
               conditions:
                 description: Conditions represent the latest available observations
                   of the ProviderConfig's state.
@@ -274,6 +545,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastProbeTime:
+                description: LastProbeTime is the timestamp of the last health probe.
+                format: date-time
+                type: string
               lastValidationTime:
                 description: LastValidationTime is the timestamp of the last successful
                   validation.
@@ -283,6 +558,9 @@ spec:
                 description: ProviderVersion is the detected version of the infrastructure
                   provider.
                 type: string
+              ready:
+                description: Ready indicates overall readiness of the provider.
+                type: boolean
               validated:
                 description: Validated indicates whether the provider configuration
                   has been validated.
