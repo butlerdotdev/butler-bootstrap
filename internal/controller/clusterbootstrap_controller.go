@@ -463,9 +463,15 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 		cpIPs := r.getControlPlaneIPs(cb)
 		workerIPs := r.getWorkerIPs(cb)
 
+		endpoint := r.resolveControlPlaneEndpoint(cb)
+		if endpoint == "" {
+			logger.Info("Control plane endpoint not yet available (no VIP and no CP IPs discovered), requeueing")
+			return ctrl.Result{RequeueAfter: requeueShort}, nil
+		}
+
 		opts := TalosConfigOptions{
 			ClusterName:                    cb.Spec.Cluster.Name,
-			ControlPlaneVIP:                r.resolveControlPlaneEndpoint(cb),
+			ControlPlaneVIP:                endpoint,
 			ControlPlaneIPs:                cpIPs,
 			WorkerIPs:                      workerIPs,
 			PodCIDR:                        cb.Spec.Network.PodCIDR,

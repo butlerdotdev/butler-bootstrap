@@ -1548,12 +1548,18 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 		return fmt.Errorf("failed to install Steward CAPI provider: %w", err)
 	}
 	// Install infrastructure provider manually with credentials.
-	// Non-fatal: CAPI infra providers (CAPG, CAPA, CAPZ) have webhook CRDs with
-	// placeholder caBundle that cert-manager's ca-injector must populate. If the
-	// CA hasn't propagated yet, kubectl apply rejects the invalid PEM. The
-	// provider can be installed post-bootstrap; core + capi-steward are sufficient.
+	// Cloud providers (gcp, aws, azure): Non-fatal. CAPI infra providers (CAPG, CAPA, CAPZ)
+	// have webhook CRDs with placeholder caBundle that cert-manager's ca-injector must populate.
+	// If the CA hasn't propagated yet, kubectl apply rejects the invalid PEM. The provider can
+	// be installed post-bootstrap; core + capi-steward are sufficient.
+	// On-prem providers (harvester, nutanix, proxmox): Fatal. These providers don't have the
+	// cert-manager webhook dependency issue and must succeed for bootstrap to proceed.
 	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, creds); err != nil {
-		logger.Info("Infrastructure provider install failed (non-fatal, can be installed post-bootstrap)", "provider", mgmtProvider, "error", err)
+		if isCloudProvider(mgmtProvider) {
+			logger.Info("Infrastructure provider install failed (non-fatal for cloud provider, can be installed post-bootstrap)", "provider", mgmtProvider, "error", err)
+		} else {
+			return fmt.Errorf("infrastructure provider install failed for on-prem provider %s: %w", mgmtProvider, err)
+		}
 	}
 
 	// Install any additional providers
@@ -1586,6 +1592,15 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 }
 
 // installInfraProvider installs a CAPI infrastructure provider
+// isCloudProvider returns true for cloud providers (gcp, aws, azure).
+func isCloudProvider(provider string) bool {
+	switch provider {
+	case "gcp", "aws", "azure":
+		return true
+	}
+	return false
+}
+
 func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 
@@ -1728,11 +1743,13 @@ func (i *Installer) substituteGCPVariables(manifest string, creds *GCPCredential
 // substituteDefaults replaces remaining ${VAR:=default} patterns with their default values.
 // This handles shell-style variable substitution patterns commonly found in CAPI manifests.
 func substituteDefaults(manifest string) string {
-	for {
-		idx := strings.Index(manifest, "${")
+	offset := 0
+	for offset < len(manifest) {
+		idx := strings.Index(manifest[offset:], "${")
 		if idx == -1 {
 			break
 		}
+		idx += offset
 		end := strings.Index(manifest[idx:], "}")
 		if end == -1 {
 			break
@@ -1743,10 +1760,11 @@ func substituteDefaults(manifest string) string {
 		if colonIdx := strings.Index(expr, ":="); colonIdx != -1 {
 			defaultVal := expr[colonIdx+2:]
 			manifest = manifest[:idx] + defaultVal + manifest[end+1:]
+			// Don't advance offset -- replacement may be shorter, rescan from same position
 			continue
 		}
-		// Skip patterns we don't understand (move past to avoid infinite loop)
-		break
+		// Skip patterns we don't understand (advance past closing brace)
+		offset = end + 1
 	}
 	return manifest
 }
