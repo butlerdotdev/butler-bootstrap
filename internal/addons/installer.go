@@ -83,7 +83,8 @@ type ProxmoxCredentials struct {
 	Password string
 }
 
-// GCPCredentials holds GCP credentials
+// GCPCredentials contains GCP service account and infrastructure config
+// extracted from a ProviderConfig for use during bootstrap.
 type GCPCredentials struct {
 	ServiceAccountKey string // JSON service account key
 	ProjectID         string
@@ -96,7 +97,8 @@ type GCPCredentials struct {
 	ImageFamily       string
 }
 
-// AWSCredentials holds AWS credentials for EC2 provisioning.
+// AWSCredentials contains IAM credentials and VPC config
+// extracted from a ProviderConfig for use during bootstrap.
 type AWSCredentials struct {
 	AccessKeyID     string
 	SecretAccessKey  string
@@ -106,7 +108,8 @@ type AWSCredentials struct {
 	SecurityGroupID  string
 }
 
-// AzureCredentials holds Azure credentials for VM provisioning.
+// AzureCredentials contains service principal credentials and resource group config
+// extracted from a ProviderConfig for use during bootstrap.
 type AzureCredentials struct {
 	ClientID       string
 	ClientSecret   string
@@ -1344,6 +1347,8 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
+// generateGCPProviderConfig returns the Secret and ProviderConfig manifests
+// for a GCP provider on the target management cluster.
 func (i *Installer) generateGCPProviderConfig(creds *GCPCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -1401,6 +1406,8 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
+// generateAWSProviderConfig returns the Secret and ProviderConfig manifests
+// for an AWS provider on the target management cluster.
 func (i *Installer) generateAWSProviderConfig(creds *AWSCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -1447,6 +1454,8 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
+// generateAzureProviderConfig returns the Secret and ProviderConfig manifests
+// for an Azure provider on the target management cluster.
 func (i *Installer) generateAzureProviderConfig(creds *AzureCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
