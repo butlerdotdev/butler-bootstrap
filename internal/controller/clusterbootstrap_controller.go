@@ -480,7 +480,7 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 		cpIPs := r.getControlPlaneIPs(cb)
 		workerIPs := r.getWorkerIPs(cb)
 
-		endpoint := r.resolveControlPlaneEndpoint(cb)
+		endpoint := r.resolveControlPlaneEndpoint(ctx, cb)
 		if endpoint == "" {
 			logger.Info("Control plane endpoint not yet available (no VIP and no CP IPs discovered), requeueing")
 			return ctrl.Result{RequeueAfter: requeueShort}, nil
@@ -675,7 +675,7 @@ func (r *ClusterBootstrapReconciler) reconcileBootstrappingCluster(ctx context.C
 		}
 
 		cb.Status.Kubeconfig = base64.StdEncoding.EncodeToString(kubeconfig)
-		cb.Status.ControlPlaneEndpoint = fmt.Sprintf("https://%s:6443", r.resolveControlPlaneEndpoint(cb))
+		cb.Status.ControlPlaneEndpoint = fmt.Sprintf("https://%s:6443", r.resolveControlPlaneEndpoint(ctx, cb))
 		if err := r.Status().Update(ctx, cb); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1254,21 +1254,25 @@ func (r *ClusterBootstrapReconciler) getWorkerIPs(cb *butlerv1alpha1.ClusterBoot
 
 // resolveControlPlaneEndpoint returns the control plane API server endpoint.
 // For on-prem providers with kube-vip, this is the VIP from the spec. For cloud
-// HA providers, this is the LoadBalancerRequest endpoint. For single-node cloud,
-// this falls back to the first control plane node's IP.
-func (r *ClusterBootstrapReconciler) resolveControlPlaneEndpoint(cb *butlerv1alpha1.ClusterBootstrap) string {
+// HA providers, this is the LoadBalancerRequest endpoint (blocks until Ready).
+// For single-node cloud, this falls back to the first control plane node's IP.
+func (r *ClusterBootstrapReconciler) resolveControlPlaneEndpoint(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) string {
 	if cb.Spec.Network.VIP != "" {
 		return cb.Spec.Network.VIP
 	}
 
-	// For cloud HA, look up the LoadBalancerRequest endpoint
+	// For cloud HA, require the LoadBalancerRequest endpoint — do NOT fall
+	// back to a node IP because Talos configs are generated once and the
+	// endpoint is permanently baked in.
 	if cb.IsCloudProvider() && !cb.IsSingleNode() {
 		lbr := &butlerv1alpha1.LoadBalancerRequest{}
 		lbrName := cb.Spec.Cluster.Name + "-cp-lb"
-		err := r.Get(context.Background(), client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr)
-		if err == nil && lbr.IsReady() {
+		err := r.Get(ctx, client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr)
+		if err == nil && lbr.IsReady() && lbr.Status.Endpoint != "" {
 			return lbr.Status.Endpoint
 		}
+		// LBR not ready yet — return empty to trigger requeue in caller
+		return ""
 	}
 
 	cpIPs := r.getControlPlaneIPs(cb)
