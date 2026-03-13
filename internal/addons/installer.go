@@ -766,53 +766,6 @@ func (i *Installer) InstallGatewayAPI(ctx context.Context, kubeconfig []byte, ve
 	return nil
 }
 
-// // InstallStewardCRDs installs Steward CRDs separately (optional - main chart includes CRDs)
-// func (i *Installer) InstallStewardCRDs(ctx context.Context, kubeconfig []byte, version string) error {
-// 	logger := log.FromContext(ctx)
-// 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer cleanup()
-//
-// 	if version == "" {
-// 		version = "0.1.0"
-// 	}
-//
-// 	logger.Info("Installing Steward CRDs", "version", version)
-//
-// 	// Install Steward CRDs via OCI registry
-// 	args := []string{
-// 		"upgrade", "--install", "steward-crds",
-// 		"oci://ghcr.io/butlerdotdev/charts/steward-crds",
-// 		"--namespace", "steward-system",
-// 		"--create-namespace",
-// 		"--version", version,
-// 		"--wait",
-// 		"--timeout", "2m",
-// 	}
-//
-// 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
-// 		return fmt.Errorf("failed to install Steward CRDs: %w", err)
-// 	}
-//
-// 	// Wait for CRDs to be established
-// 	crds := []string{
-// 		"tenantcontrolplanes.steward.butlerlabs.dev",
-// 		"datastores.steward.butlerlabs.dev",
-// 	}
-//
-// 	for _, crd := range crds {
-// 		if err := i.runKubectl(ctx, kubeconfigPath, "wait", "--for=condition=Established",
-// 			"crd", crd, "--timeout=60s"); err != nil {
-// 			logger.Info("Steward CRD wait timeout (may already be ready)", "crd", crd)
-// 		}
-// 	}
-//
-// 	logger.Info("Steward CRDs installed successfully")
-// 	return nil
-// }
-
 // InstallSteward installs Steward for hosted control planes (replaces Kamaji)
 func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
@@ -840,7 +793,7 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 		"--namespace", "steward-system",
 		"--version", version,
 		"--set", "image.repository=ghcr.io/butlerdotdev/steward",
-		"--set", "image.tag=v0.1.0-alpha",
+		"--set", fmt.Sprintf("image.tag=%s", version),
 		"--set", "steward-etcd.deploy=true",
 		"--wait",
 		"--timeout", "5m",
@@ -2153,78 +2106,4 @@ func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath st
 	}
 
 	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
-}
-
-// getConsoleURL determines the URL to access the console
-func (i *Installer) getConsoleURL(ctx context.Context, kubeconfigPath string, cfg ConsoleConfig) string {
-	logger := log.FromContext(ctx)
-
-	// If ingress is configured, use the ingress host
-	if cfg.Ingress.Enabled && cfg.Ingress.Host != "" {
-		scheme := "http"
-		if cfg.Ingress.TLS {
-			scheme = "https"
-		}
-		return fmt.Sprintf("%s://%s", scheme, cfg.Ingress.Host)
-	}
-
-	// Try to get LoadBalancer IP from frontend service
-	cmd := exec.CommandContext(ctx, i.KubectlPath,
-		"--kubeconfig", kubeconfigPath,
-		"--insecure-skip-tls-verify",
-		"get", "svc", "butler-console-frontend",
-		"-n", "butler-system",
-		"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
-	)
-	if i.NodeIP != "" {
-		cmd.Args = append(cmd.Args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
-	}
-
-	output, err := cmd.Output()
-	if err == nil && len(output) > 0 {
-		return fmt.Sprintf("http://%s", string(output))
-	}
-
-	// Fallback: try to get external IP
-	cmd = exec.CommandContext(ctx, i.KubectlPath,
-		"--kubeconfig", kubeconfigPath,
-		"--insecure-skip-tls-verify",
-		"get", "svc", "butler-console-frontend",
-		"-n", "butler-system",
-		"-o", "jsonpath={.spec.externalIPs[0]}",
-	)
-	if i.NodeIP != "" {
-		cmd.Args = append(cmd.Args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
-	}
-
-	output, err = cmd.Output()
-	if err == nil && len(output) > 0 {
-		return fmt.Sprintf("http://%s", string(output))
-	}
-
-	// Last resort: use port-forward instruction
-	logger.Info("Could not determine console external URL, will require port-forward")
-	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
-}
-
-// ConsoleConfig is passed to InstallConsole
-// This mirrors the config from orchestrator package
-type ConsoleConfig struct {
-	Enabled bool
-	Version string
-	Ingress ConsoleIngressConfig
-	Auth    ConsoleAuthConfig
-}
-
-type ConsoleIngressConfig struct {
-	Enabled       bool
-	Host          string
-	ClassName     string
-	TLS           bool
-	TLSSecretName string
-}
-
-type ConsoleAuthConfig struct {
-	AdminPassword string
-	JWTSecret     string
 }

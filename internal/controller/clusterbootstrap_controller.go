@@ -104,9 +104,8 @@ type AddonInstallerInterface interface {
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
 	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
-	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error // NEW: Gateway API CRDs
-	// InstallStewardCRDs(ctx context.Context, kubeconfig []byte, version string) error // NEW: Steward CRDs (optional)
-	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error // NEW: Replaces InstallKamaji
+	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error
+	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
 	InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error
@@ -793,7 +792,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 
 		r.setAddonInstalled(cb, "kube-vip")
 		if err := r.Status().Update(ctx, cb); err != nil {
-			logger.Info("Failed to update status after kube-vip step", "error", err)
+			logger.Error(err, "Failed to update status after kube-vip step")
 		}
 	}
 
@@ -814,7 +813,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "cilium")
 			logger.Info("Cilium installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Cilium install", "error", err)
+				logger.Error(err, "Failed to update status after Cilium install")
 			}
 		}
 	}
@@ -846,7 +845,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "cert-manager")
 			logger.Info("cert-manager installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after cert-manager install", "error", err)
+				logger.Error(err, "Failed to update status after cert-manager install")
 			}
 		}
 	}
@@ -873,7 +872,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "longhorn")
 			logger.Info("Longhorn installed successfully", "replicaCount", replicas)
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Longhorn install", "error", err)
+				logger.Error(err, "Failed to update status after Longhorn install")
 			}
 		}
 	}
@@ -891,7 +890,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "metallb")
 			logger.Info("MetalLB installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after MetalLB install", "error", err)
+				logger.Error(err, "Failed to update status after MetalLB install")
 			}
 		}
 	}
@@ -920,7 +919,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 
 		r.setAddonInstalled(cb, "traefik")
 		if err := r.Status().Update(ctx, cb); err != nil {
-			logger.Info("Failed to update status after Traefik step", "error", err)
+			logger.Error(err, "Failed to update status after Traefik step")
 		}
 	}
 
@@ -935,33 +934,11 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		r.setAddonInstalled(cb, "gateway-api")
 		logger.Info("Gateway API CRDs installed successfully")
 		if err := r.Status().Update(ctx, cb); err != nil {
-			logger.Info("Failed to update status after Gateway API install", "error", err)
+			logger.Error(err, "Failed to update status after Gateway API install")
 		}
 	}
 
-	// 7b. Steward CRDs - install before controller to ensure CRDs exist
-	// if addons.ControlPlaneProvider == nil || isAddonEnabled(addons.ControlPlaneProvider.Enabled) {
-	// 	if !r.isAddonInstalled(cb, "steward-crds") {
-	// 		logger.Info("Installing Steward CRDs")
-	// 		version := ""
-	// 		if addons.ControlPlaneProvider != nil && addons.ControlPlaneProvider.Version != "" {
-	// 			version = addons.ControlPlaneProvider.Version
-	// 		}
-	//
-	// 		if err := r.AddonInstaller.InstallStewardCRDs(ctx, kubeconfig, version); err != nil {
-	// 			logger.Error(err, "Failed to install Steward CRDs")
-	// 			return ctrl.Result{RequeueAfter: requeueShort}, nil
-	// 		}
-	//
-	// 		r.setAddonInstalled(cb, "steward-crds")
-	// 		logger.Info("Steward CRDs installed successfully")
-	// 		if err := r.Status().Update(ctx, cb); err != nil {
-	// 			logger.Info("Failed to update status after Steward CRDs install", "error", err)
-	// 		}
-	// 	}
-	// }
-
-	// 7c. Steward - hosted control planes (replaces Kamaji)
+	// 7b. Steward - hosted control planes (replaces Kamaji)
 	if addons.ControlPlaneProvider == nil || isAddonEnabled(addons.ControlPlaneProvider.Enabled) {
 		if !r.isAddonInstalled(cb, "steward") {
 			logger.Info("Installing Steward")
@@ -978,7 +955,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "steward")
 			logger.Info("Steward installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Steward install", "error", err)
+				logger.Error(err, "Failed to update status after Steward install")
 			}
 		}
 	}
@@ -1013,7 +990,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "capi")
 			logger.Info("CAPI installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after CAPI install", "error", err)
+				logger.Error(err, "Failed to update status after CAPI install")
 			}
 		}
 	}
@@ -1031,7 +1008,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "flux")
 			logger.Info("Flux installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Flux install", "error", err)
+				logger.Error(err, "Failed to update status after Flux install")
 			}
 		}
 	}
@@ -1049,7 +1026,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "butler-crds")
 			logger.Info("Butler CRDs installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Butler CRDs install", "error", err)
+				logger.Error(err, "Failed to update status after Butler CRDs install")
 			}
 		}
 	}
@@ -1080,7 +1057,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "butler-addons")
 			logger.Info("Butler addon definitions installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Butler addons install", "error", err)
+				logger.Error(err, "Failed to update status after Butler addons install")
 			}
 		}
 	}
@@ -1101,7 +1078,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "butler-controller")
 			logger.Info("Butler Controller installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Butler Controller install", "error", err)
+				logger.Error(err, "Failed to update status after Butler Controller install")
 			}
 		}
 	}
@@ -1118,7 +1095,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		r.setAddonInstalled(cb, "butler")
 		logger.Info("Butler installed successfully")
 		if err := r.Status().Update(ctx, cb); err != nil {
-			logger.Info("Failed to update status after Butler install", "error", err)
+			logger.Error(err, "Failed to update status after Butler install")
 		}
 	}
 
@@ -1138,7 +1115,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "butler-config-exposure")
 			logger.Info("ButlerConfig exposure settings written successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after ButlerConfig write", "error", err)
+				logger.Error(err, "Failed to update status after ButlerConfig write")
 			}
 		} else {
 			// No exposure config specified, skip but mark as done
@@ -1163,7 +1140,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			r.setAddonInstalled(cb, "butler-console")
 			logger.Info("Butler Console installed successfully", "url", consoleURL)
 			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Console install", "error", err)
+				logger.Error(err, "Failed to update status after Console install")
 			}
 		}
 	}
@@ -1649,7 +1626,7 @@ func (r *ClusterBootstrapReconciler) reconcileButlerConfig(ctx context.Context, 
 	bc.Status.TCPProxyRequired = cb.IsTCPProxyRequired()
 
 	if err := targetClient.Status().Update(ctx, bc); err != nil {
-		logger.Info("Failed to update ButlerConfig status", "error", err)
+		logger.Error(err, "Failed to update ButlerConfig status")
 		// Don't fail on status update error
 	}
 
