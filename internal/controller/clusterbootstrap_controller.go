@@ -288,6 +288,15 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 		"singleNode", isSingleNode,
 		"expectedMachines", expectedCount)
 
+	// For cloud HA topologies, ensure a LoadBalancerRequest exists so the
+	// provider controller can provision an LB before Talos configs are generated.
+	if cb.IsCloudProvider() && !isSingleNode {
+		if err := r.ensureLoadBalancerRequest(ctx, cb); err != nil {
+			logger.Error(err, "Failed to ensure LoadBalancerRequest")
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Resolve OS image via ImageSync before creating MachineRequests.
 	// This ensures the image is available on the provider before VMs are created.
 	providerImageRef, err := r.reconcileImageSync(ctx, cb)
@@ -333,6 +342,13 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 	if err := r.updateMachineStatuses(ctx, cb); err != nil {
 		logger.Error(err, "Failed to update machine statuses")
 		return ctrl.Result{}, err
+	}
+
+	// Update LB targets with running control plane instances
+	if cb.IsCloudProvider() && !isSingleNode {
+		if err := r.updateLoadBalancerTargets(ctx, cb); err != nil {
+			logger.Info("Failed to update LB targets", "error", err)
+		}
 	}
 
 	// Check if all machines are ready using the CRD helper method
@@ -1222,12 +1238,24 @@ func (r *ClusterBootstrapReconciler) getWorkerIPs(cb *butlerv1alpha1.ClusterBoot
 }
 
 // resolveControlPlaneEndpoint returns the control plane API server endpoint.
-// For on-prem providers with kube-vip, this is the VIP. For cloud providers
-// without VIP, this is the first control plane node's IP.
+// For on-prem providers with kube-vip, this is the VIP from the spec. For cloud
+// HA providers, this is the LoadBalancerRequest endpoint. For single-node cloud,
+// this falls back to the first control plane node's IP.
 func (r *ClusterBootstrapReconciler) resolveControlPlaneEndpoint(cb *butlerv1alpha1.ClusterBootstrap) string {
 	if cb.Spec.Network.VIP != "" {
 		return cb.Spec.Network.VIP
 	}
+
+	// For cloud HA, look up the LoadBalancerRequest endpoint
+	if cb.IsCloudProvider() && !cb.IsSingleNode() {
+		lbr := &butlerv1alpha1.LoadBalancerRequest{}
+		lbrName := cb.Spec.Cluster.Name + "-cp-lb"
+		err := r.Get(context.Background(), client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr)
+		if err == nil && lbr.IsReady() {
+			return lbr.Status.Endpoint
+		}
+	}
+
 	cpIPs := r.getControlPlaneIPs(cb)
 	if len(cpIPs) > 0 {
 		return cpIPs[0]
@@ -1791,10 +1819,124 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 	return "", fmt.Errorf("ImageSync %s created, waiting for completion", imageSyncName)
 }
 
+// ensureLoadBalancerRequest creates a LoadBalancerRequest for the cluster's
+// control plane endpoint if one does not already exist. Only called for cloud
+// HA topologies where kube-vip is not available.
+func (r *ClusterBootstrapReconciler) ensureLoadBalancerRequest(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
+	logger := log.FromContext(ctx)
+
+	lbrName := cb.Spec.Cluster.Name + "-cp-lb"
+	lbr := &butlerv1alpha1.LoadBalancerRequest{}
+	err := r.Get(ctx, client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr)
+	if err == nil {
+		return nil // Already exists
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	lbr = &butlerv1alpha1.LoadBalancerRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lbrName,
+			Namespace: cb.Namespace,
+			Labels: map[string]string{
+				"butler.butlerlabs.dev/cluster-bootstrap": cb.Name,
+				"butler.butlerlabs.dev/cluster":           cb.Spec.Cluster.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         cb.APIVersion,
+					Kind:               cb.Kind,
+					Name:               cb.Name,
+					UID:                cb.UID,
+					Controller:         boolPtr(true),
+					BlockOwnerDeletion: boolPtr(true),
+				},
+			},
+		},
+		Spec: butlerv1alpha1.LoadBalancerRequestSpec{
+			ClusterName: cb.Spec.Cluster.Name,
+			ProviderConfigRef: butlerv1alpha1.ProviderReference{
+				Name:      cb.Spec.ProviderRef.Name,
+				Namespace: cb.Spec.ProviderRef.Namespace,
+			},
+			Port: 6443,
+		},
+	}
+
+	if err := r.Create(ctx, lbr); err != nil {
+		if errors.IsAlreadyExists(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to create LoadBalancerRequest %s: %w", lbrName, err)
+	}
+
+	logger.Info("Created LoadBalancerRequest for cloud HA control plane", "name", lbrName)
+	return nil
+}
+
+// updateLoadBalancerTargets updates the LoadBalancerRequest's target list with
+// running control plane machine IPs and instance names. Called each reconcile
+// so the provider controller can register new backends as VMs come online.
+func (r *ClusterBootstrapReconciler) updateLoadBalancerTargets(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
+	logger := log.FromContext(ctx)
+
+	lbrName := cb.Spec.Cluster.Name + "-cp-lb"
+	lbr := &butlerv1alpha1.LoadBalancerRequest{}
+	if err := r.Get(ctx, client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr); err != nil {
+		return fmt.Errorf("failed to get LoadBalancerRequest %s: %w", lbrName, err)
+	}
+
+	var targets []butlerv1alpha1.LoadBalancerTarget
+	for _, m := range cb.Status.Machines {
+		if m.Role != "control-plane" {
+			continue
+		}
+		if m.IPAddress == "" {
+			continue
+		}
+		targets = append(targets, butlerv1alpha1.LoadBalancerTarget{
+			IP:           m.IPAddress,
+			InstanceName: m.Name,
+		})
+	}
+
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// Only update if targets changed
+	if len(targets) == len(lbr.Spec.Targets) {
+		changed := false
+		existing := make(map[string]bool)
+		for _, t := range lbr.Spec.Targets {
+			existing[t.IP] = true
+		}
+		for _, t := range targets {
+			if !existing[t.IP] {
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return nil
+		}
+	}
+
+	lbr.Spec.Targets = targets
+	if err := r.Update(ctx, lbr); err != nil {
+		return fmt.Errorf("failed to update LoadBalancerRequest targets: %w", err)
+	}
+
+	logger.Info("Updated LoadBalancerRequest targets", "name", lbrName, "targetCount", len(targets))
+	return nil
+}
+
 func (r *ClusterBootstrapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&butlerv1alpha1.ClusterBootstrap{}).
 		Owns(&butlerv1alpha1.MachineRequest{}).
 		Owns(&butlerv1alpha1.ImageSync{}).
+		Owns(&butlerv1alpha1.LoadBalancerRequest{}).
 		Complete(r)
 }
