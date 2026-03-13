@@ -74,7 +74,8 @@ type TalosConfigOptions struct {
 	InstallDisk                    string
 	Platform                       string // Cloud platform for Talos metadata discovery (gcp, aws, azure). Empty for on-prem.
 	ConfigPatches                  []ConfigPatch
-	AllowSchedulingOnControlPlanes bool // For single-node topology
+	ControlPlaneConfigPatches      []ConfigPatch // Patches applied only to control plane configs
+	AllowSchedulingOnControlPlanes bool          // For single-node topology
 }
 
 // ConfigPatch mirrors the CRD type
@@ -508,6 +509,20 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 				Op:    p.Op,
 				Path:  p.Path,
 				Value: p.Value,
+			})
+		}
+
+		// For cloud HA, add the LB IP to the loopback interface on CP nodes.
+		// GCP (and other cloud) passthrough NLBs deliver packets with the
+		// destination IP set to the LB's IP. The kernel must recognize this
+		// IP as local to accept the traffic. Adding it to the loopback
+		// interface achieves this without conflicting with the primary NIC.
+		if cb.IsCloudProvider() && !cb.IsSingleNode() && endpoint != "" {
+			logger.Info("Adding cloud LB IP to CP loopback interface", "ip", endpoint)
+			opts.ControlPlaneConfigPatches = append(opts.ControlPlaneConfigPatches, ConfigPatch{
+				Op:    "add",
+				Path:  "/machine/network/interfaces",
+				Value: fmt.Sprintf(`[{"interface":"lo","addresses":["%s/32"]}]`, endpoint),
 			})
 		}
 

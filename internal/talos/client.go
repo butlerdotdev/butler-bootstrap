@@ -149,6 +149,16 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 		args = append(args, "--config-patch", patchJSON)
 	}
 
+	// Add control-plane-only patches (e.g., cloud LB IP on loopback)
+	for _, patch := range opts.ControlPlaneConfigPatches {
+		patchJSON := fmt.Sprintf(`[{"op": "%s", "path": "%s"`, patch.Op, patch.Path)
+		if patch.Op != "remove" && patch.Value != "" {
+			patchJSON += fmt.Sprintf(`, "value": %s`, patch.Value)
+		}
+		patchJSON += "}]"
+		args = append(args, "--config-patch-control-plane", patchJSON)
+	}
+
 	logger.Info("Running talosctl gen config",
 		"cluster", opts.ClusterName,
 		"singleNode", opts.AllowSchedulingOnControlPlanes)
