@@ -20,12 +20,6 @@ ARG REPO_DIR=.
 
 COPY ${REPO_DIR}/go.mod ${REPO_DIR}/go.sum ./
 
-# go.mod has: replace github.com/butlerdotdev/butler-api => ../butler-api
-# Copy butler-api module source so the replace directive resolves.
-# /workspace is our WORKDIR, so ../butler-api resolves to /butler-api.
-COPY butler-api/go.mod butler-api/go.sum /butler-api/
-COPY butler-api/api/ /butler-api/api/
-
 RUN go mod download
 
 COPY ${REPO_DIR}/ .
