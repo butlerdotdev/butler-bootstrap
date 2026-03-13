@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
+	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
 
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,6 +43,9 @@ type ProviderCredentials struct {
 	Harvester *HarvesterCredentials
 	VSphere   *VSphereCredentials
 	Proxmox   *ProxmoxCredentials
+	GCP       *GCPCredentials
+	AWS       *AWSCredentials
+	Azure     *AzureCredentials
 }
 
 // NutanixCredentials holds Nutanix Prism Central credentials
@@ -77,6 +81,44 @@ type ProxmoxCredentials struct {
 	Endpoint string
 	Username string
 	Password string
+}
+
+// GCPCredentials contains GCP service account and infrastructure config
+// extracted from a ProviderConfig for use during bootstrap.
+type GCPCredentials struct {
+	ServiceAccountKey string // JSON service account key
+	ProjectID         string
+	Region            string
+	Network           string
+	Subnetwork        string
+	Zone              string
+	MachineType       string
+	ImageProject      string
+	ImageFamily       string
+}
+
+// AWSCredentials contains IAM credentials and VPC config
+// extracted from a ProviderConfig for use during bootstrap.
+type AWSCredentials struct {
+	AccessKeyID     string
+	SecretAccessKey  string
+	Region           string
+	VPCID            string
+	SubnetID         string
+	SecurityGroupID  string
+}
+
+// AzureCredentials contains service principal credentials and resource group config
+// extracted from a ProviderConfig for use during bootstrap.
+type AzureCredentials struct {
+	ClientID       string
+	ClientSecret   string
+	TenantID       string
+	SubscriptionID string
+	ResourceGroup  string
+	Location       string
+	VNetName       string
+	SubnetName     string
 }
 
 // NewInstaller creates a new addon installer
@@ -590,6 +632,53 @@ spec:
 	return i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name())
 }
 
+// InstallCloudControllerManager installs the cloud-specific CCM via Helm.
+// CCM is required for LoadBalancer services to get external IPs on cloud providers.
+func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error {
+	logger := log.FromContext(ctx)
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	logger.Info("Installing Cloud Controller Manager", "provider", provider)
+	i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "kube-system")
+
+	switch provider {
+	case "gcp":
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
+			"https://kubernetes-sigs.github.io/cloud-provider-gcp")
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+		return i.runHelm(ctx, kubeconfigPath,
+			"upgrade", "--install", "cloud-controller-manager",
+			"cloud-provider-gcp/cloud-provider-gcp",
+			"--namespace", "kube-system",
+			"--wait", "--timeout", "5m")
+	case "aws":
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "aws-cloud-controller-manager",
+			"https://kubernetes.github.io/cloud-provider-aws")
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+		return i.runHelm(ctx, kubeconfigPath,
+			"upgrade", "--install", "aws-cloud-controller-manager",
+			"aws-cloud-controller-manager/aws-cloud-controller-manager",
+			"--namespace", "kube-system",
+			"--wait", "--timeout", "5m")
+	case "azure":
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",
+			"https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/helm/repo")
+		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+		return i.runHelm(ctx, kubeconfigPath,
+			"upgrade", "--install", "cloud-controller-manager",
+			"cloud-provider-azure/cloud-controller-manager",
+			"--namespace", "kube-system",
+			"--wait", "--timeout", "5m")
+	default:
+		logger.Info("No CCM needed for provider", "provider", provider)
+		return nil
+	}
+}
+
 // InstallTraefik installs Traefik ingress controller
 func (i *Installer) InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
@@ -822,7 +911,8 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 	return nil
 }
 
-// InstallButlerCRDs installs Butler platform CRDs via Helm chart
+// InstallButlerCRDs installs Butler platform CRDs via Helm chart and overlays
+// embedded CRDs to ensure cloud provider fields are present.
 func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Installing Butler platform CRDs", "version", version)
@@ -838,7 +928,7 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 	}
 
 	if version == "" {
-		version = "0.1.0"
+		version = "0.6.0"
 	}
 
 	args := []string{
@@ -853,6 +943,12 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 
 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
 		return fmt.Errorf("failed to install butler-crds: %w", err)
+	}
+
+	// Overlay embedded CRDs to ensure cloud provider fields and any
+	// dev-branch CRD changes are present on the target cluster.
+	if err := i.applyEmbeddedCRDs(ctx, kubeconfigPath); err != nil {
+		logger.Info("Failed to overlay embedded CRDs (non-fatal)", "error", err)
 	}
 
 	// Wait for all Butler CRDs to be established (discover dynamically)
@@ -938,6 +1034,51 @@ func (i *Installer) waitForButlerCRDs(ctx context.Context, kubeconfigPath string
 	return nil
 }
 
+// applyEmbeddedCRDs applies the embedded CRD YAML files to the target cluster.
+// This overlays any fields that are present in the build but not yet released
+// in the butler-crds Helm chart (e.g., cloud provider fields on ProviderConfig).
+func (i *Installer) applyEmbeddedCRDs(ctx context.Context, kubeconfigPath string) error {
+	logger := log.FromContext(ctx)
+
+	entries, err := crds.PlatformCRDs.ReadDir(".")
+	if err != nil {
+		return fmt.Errorf("failed to read embedded CRDs: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+
+		data, err := crds.PlatformCRDs.ReadFile(entry.Name())
+		if err != nil {
+			logger.Info("Failed to read embedded CRD", "file", entry.Name(), "error", err)
+			continue
+		}
+
+		tmpFile, err := os.CreateTemp("", "crd-*.yaml")
+		if err != nil {
+			return fmt.Errorf("failed to create temp file: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+
+		if _, err := tmpFile.Write(data); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to write CRD temp file: %w", err)
+		}
+		tmpFile.Close()
+
+		logger.Info("Applying embedded CRD", "file", entry.Name())
+		if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", tmpPath); err != nil {
+			logger.Info("Failed to apply embedded CRD (non-fatal)", "file", entry.Name(), "error", err)
+		}
+		os.Remove(tmpPath)
+	}
+
+	return nil
+}
+
 // InstallInitialProviderConfig creates the initial ProviderConfig CR and credentials secret
 // on the management cluster based on the provider used during bootstrap.
 func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *ProviderCredentials) error {
@@ -968,6 +1109,21 @@ func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig
 			return fmt.Errorf("harvester credentials required")
 		}
 		secretManifest, providerConfigManifest = i.generateHarvesterProviderConfig(creds.Harvester)
+	case "gcp":
+		if creds == nil || creds.GCP == nil {
+			return fmt.Errorf("gcp credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateGCPProviderConfig(creds.GCP)
+	case "aws":
+		if creds == nil || creds.AWS == nil {
+			return fmt.Errorf("aws credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateAWSProviderConfig(creds.AWS)
+	case "azure":
+		if creds == nil || creds.Azure == nil {
+			return fmt.Errorf("azure credentials required")
+		}
+		secretManifest, providerConfigManifest = i.generateAzureProviderConfig(creds.Azure)
 	default:
 		logger.Info("Provider type not yet supported for ProviderConfig creation, skipping", "provider", providerType)
 		return nil
@@ -1191,6 +1347,162 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
+// generateGCPProviderConfig returns the Secret and ProviderConfig manifests
+// for a GCP provider on the target management cluster.
+func (i *Installer) generateGCPProviderConfig(creds *GCPCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: gcp-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  serviceAccountKey: '%s'
+`, creds.ServiceAccountKey)
+
+	// Build GCP config section
+	gcpConfig := fmt.Sprintf(`    projectID: "%s"
+    region: "%s"`, creds.ProjectID, creds.Region)
+
+	if creds.Network != "" {
+		gcpConfig += fmt.Sprintf(`
+    network: "%s"`, creds.Network)
+	}
+	if creds.Subnetwork != "" {
+		gcpConfig += fmt.Sprintf(`
+    subnetwork: "%s"`, creds.Subnetwork)
+	}
+	if creds.Zone != "" {
+		gcpConfig += fmt.Sprintf(`
+    zone: "%s"`, creds.Zone)
+	}
+	if creds.MachineType != "" {
+		gcpConfig += fmt.Sprintf(`
+    machineType: "%s"`, creds.MachineType)
+	}
+	if creds.ImageProject != "" {
+		gcpConfig += fmt.Sprintf(`
+    imageProject: "%s"`, creds.ImageProject)
+	}
+	if creds.ImageFamily != "" {
+		gcpConfig += fmt.Sprintf(`
+    imageFamily: "%s"`, creds.ImageFamily)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: gcp
+  namespace: butler-system
+spec:
+  provider: gcp
+  credentialsRef:
+    name: gcp-credentials
+    namespace: butler-system
+  gcp:
+%s
+`, gcpConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
+// generateAWSProviderConfig returns the Secret and ProviderConfig manifests
+// for an AWS provider on the target management cluster.
+func (i *Installer) generateAWSProviderConfig(creds *AWSCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  accessKeyID: "%s"
+  secretAccessKey: "%s"
+`, creds.AccessKeyID, creds.SecretAccessKey)
+
+	awsConfig := fmt.Sprintf(`    region: "%s"`, creds.Region)
+
+	if creds.VPCID != "" {
+		awsConfig += fmt.Sprintf(`
+    vpcID: "%s"`, creds.VPCID)
+	}
+	if creds.SubnetID != "" {
+		awsConfig += fmt.Sprintf(`
+    subnetIDs:
+    - "%s"`, creds.SubnetID)
+	}
+	if creds.SecurityGroupID != "" {
+		awsConfig += fmt.Sprintf(`
+    securityGroupIDs:
+    - "%s"`, creds.SecurityGroupID)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: aws
+  namespace: butler-system
+spec:
+  provider: aws
+  credentialsRef:
+    name: aws-credentials
+    namespace: butler-system
+  aws:
+%s
+`, awsConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
+// generateAzureProviderConfig returns the Secret and ProviderConfig manifests
+// for an Azure provider on the target management cluster.
+func (i *Installer) generateAzureProviderConfig(creds *AzureCredentials) (string, string) {
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-credentials
+  namespace: butler-system
+type: Opaque
+stringData:
+  clientID: "%s"
+  clientSecret: "%s"
+  tenantID: "%s"
+  subscriptionID: "%s"
+`, creds.ClientID, creds.ClientSecret, creds.TenantID, creds.SubscriptionID)
+
+	azureConfig := fmt.Sprintf(`    subscriptionID: "%s"
+    resourceGroup: "%s"`, creds.SubscriptionID, creds.ResourceGroup)
+
+	if creds.Location != "" {
+		azureConfig += fmt.Sprintf(`
+    location: "%s"`, creds.Location)
+	}
+	if creds.VNetName != "" {
+		azureConfig += fmt.Sprintf(`
+    vnetName: "%s"`, creds.VNetName)
+	}
+	if creds.SubnetName != "" {
+		azureConfig += fmt.Sprintf(`
+    subnetName: "%s"`, creds.SubnetName)
+	}
+
+	providerConfigManifest := fmt.Sprintf(`apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: azure
+  namespace: butler-system
+spec:
+  provider: azure
+  credentialsRef:
+    name: azure-credentials
+    namespace: butler-system
+  azure:
+%s
+`, azureConfig)
+
+	return secretManifest, providerConfigManifest
+}
+
 // InstallCAPI installs Cluster API with the specified infrastructure providers
 func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
@@ -1244,9 +1556,19 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", stewardURL); err != nil {
 		return fmt.Errorf("failed to install Steward CAPI provider: %w", err)
 	}
-	// Install infrastructure provider manually with credentials
+	// Install infrastructure provider manually with credentials.
+	// Cloud providers (gcp, aws, azure): Non-fatal. CAPI infra providers (CAPG, CAPA, CAPZ)
+	// have webhook CRDs with placeholder caBundle that cert-manager's ca-injector must populate.
+	// If the CA hasn't propagated yet, kubectl apply rejects the invalid PEM. The provider can
+	// be installed post-bootstrap; core + capi-steward are sufficient.
+	// On-prem providers (harvester, nutanix, proxmox): Fatal. These providers don't have the
+	// cert-manager webhook dependency issue and must succeed for bootstrap to proceed.
 	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, creds); err != nil {
-		return fmt.Errorf("failed to install %s provider: %w", mgmtProvider, err)
+		if isCloudProvider(mgmtProvider) {
+			logger.Info("Infrastructure provider install failed (non-fatal for cloud provider, can be installed post-bootstrap)", "provider", mgmtProvider, "error", err)
+		} else {
+			return fmt.Errorf("infrastructure provider install failed for on-prem provider %s: %w", mgmtProvider, err)
+		}
 	}
 
 	// Install any additional providers
@@ -1279,6 +1601,15 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 }
 
 // installInfraProvider installs a CAPI infrastructure provider
+// isCloudProvider returns true for cloud providers (gcp, aws, azure).
+func isCloudProvider(provider string) bool {
+	switch provider {
+	case "gcp", "aws", "azure":
+		return true
+	}
+	return false
+}
+
 func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 
@@ -1298,6 +1629,15 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 	case "proxmox":
 		namespace = "capmox-system"
 		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.6.0/infrastructure-components.yaml"
+	case "gcp":
+		namespace = "capg-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.8.0/infrastructure-components.yaml"
+	case "aws":
+		namespace = "capa-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v2.7.0/infrastructure-components.yaml"
+	case "azure":
+		namespace = "capz-system"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-azure/releases/download/v1.17.0/infrastructure-components.yaml"
 	default:
 		logger.Info("Unknown provider, skipping", "provider", provider)
 		return nil
@@ -1331,6 +1671,11 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 	if provider == "nutanix" && creds != nil && creds.Nutanix != nil {
 		manifest = i.substituteNutanixCredentials(manifest, creds.Nutanix)
 	}
+	if provider == "gcp" && creds != nil && creds.GCP != nil {
+		manifest = i.substituteGCPVariables(manifest, creds.GCP)
+	}
+	// For any remaining ${VAR:=default} patterns, substitute the default value
+	manifest = substituteDefaults(manifest)
 
 	// Write processed manifest to temp file
 	tmpFile, err := os.CreateTemp("", "provider-*.yaml")
@@ -1392,6 +1737,44 @@ func (i *Installer) substituteNutanixCredentials(manifest string, creds *Nutanix
 		manifest = strings.ReplaceAll(manifest, placeholder, value)
 	}
 
+	return manifest
+}
+
+// substituteGCPVariables replaces CAPG template variables with actual values.
+// The CAPG infrastructure-components.yaml uses ${GCP_B64ENCODED_CREDENTIALS}
+// for the credentials secret and ${VAR:=default} patterns for feature gates.
+func (i *Installer) substituteGCPVariables(manifest string, creds *GCPCredentials) string {
+	b64Creds := base64.StdEncoding.EncodeToString([]byte(creds.ServiceAccountKey))
+	manifest = strings.ReplaceAll(manifest, "${GCP_B64ENCODED_CREDENTIALS}", b64Creds)
+	return manifest
+}
+
+// substituteDefaults replaces remaining ${VAR:=default} patterns with their default values.
+// This handles shell-style variable substitution patterns commonly found in CAPI manifests.
+func substituteDefaults(manifest string) string {
+	offset := 0
+	for offset < len(manifest) {
+		idx := strings.Index(manifest[offset:], "${")
+		if idx == -1 {
+			break
+		}
+		idx += offset
+		end := strings.Index(manifest[idx:], "}")
+		if end == -1 {
+			break
+		}
+		end += idx
+		expr := manifest[idx+2 : end] // contents between ${ and }
+		// Handle ${VAR:=default} pattern
+		if colonIdx := strings.Index(expr, ":="); colonIdx != -1 {
+			defaultVal := expr[colonIdx+2:]
+			manifest = manifest[:idx] + defaultVal + manifest[end+1:]
+			// Don't advance offset -- replacement may be shorter, rescan from same position
+			continue
+		}
+		// Skip patterns we don't understand (advance past closing brace)
+		offset = end + 1
+	}
 	return manifest
 }
 
@@ -1641,7 +2024,7 @@ spec:
 func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error) {
 	logger := log.FromContext(ctx)
 
-	version := "0.1.0"
+	version := "0.4.1"
 	if spec != nil && spec.Version != "" {
 		version = spec.Version
 	}
@@ -1656,6 +2039,13 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 
 	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "butler-system"); err != nil {
 		return "", fmt.Errorf("failed to prepare butler-system namespace: %w", err)
+	}
+
+	// The butler-console chart has RBAC resources in steward-system namespace
+	// (for Steward deployment restart during cert rotation). Ensure the
+	// namespace exists so Helm doesn't fail creating the Role/RoleBinding.
+	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "steward-system"); err != nil {
+		return "", fmt.Errorf("failed to prepare steward-system namespace: %w", err)
 	}
 
 	// Build helm values

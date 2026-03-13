@@ -72,6 +72,7 @@ type TalosConfigOptions struct {
 	ServiceCIDR                    string
 	TalosVersion                   string
 	InstallDisk                    string
+	Platform                       string // Cloud platform for Talos metadata discovery (gcp, aws, azure). Empty for on-prem.
 	ConfigPatches                  []ConfigPatch
 	AllowSchedulingOnControlPlanes bool // For single-node topology
 }
@@ -99,6 +100,7 @@ type AddonInstallerInterface interface {
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
+	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error // NEW: Gateway API CRDs
 	// InstallStewardCRDs(ctx context.Context, kubeconfig []byte, version string) error // NEW: Steward CRDs (optional)
@@ -461,15 +463,22 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 		cpIPs := r.getControlPlaneIPs(cb)
 		workerIPs := r.getWorkerIPs(cb)
 
+		endpoint := r.resolveControlPlaneEndpoint(cb)
+		if endpoint == "" {
+			logger.Info("Control plane endpoint not yet available (no VIP and no CP IPs discovered), requeueing")
+			return ctrl.Result{RequeueAfter: requeueShort}, nil
+		}
+
 		opts := TalosConfigOptions{
 			ClusterName:                    cb.Spec.Cluster.Name,
-			ControlPlaneVIP:                cb.Spec.Network.VIP,
+			ControlPlaneVIP:                endpoint,
 			ControlPlaneIPs:                cpIPs,
 			WorkerIPs:                      workerIPs,
 			PodCIDR:                        cb.Spec.Network.PodCIDR,
 			ServiceCIDR:                    cb.Spec.Network.ServiceCIDR,
 			TalosVersion:                   cb.Spec.Talos.Version,
 			InstallDisk:                    cb.Spec.Talos.InstallDisk,
+			Platform:                       r.getTalosPlatform(cb.Spec.Provider),
 			AllowSchedulingOnControlPlanes: cb.IsSingleNode(), // Enable for single-node
 		}
 
@@ -608,7 +617,8 @@ func (r *ClusterBootstrapReconciler) reconcileBootstrappingCluster(ctx context.C
 			// Retry on transient errors (node still booting)
 			if strings.Contains(err.Error(), "connection refused") ||
 				strings.Contains(err.Error(), "connection reset") ||
-				strings.Contains(err.Error(), "i/o timeout") {
+				strings.Contains(err.Error(), "i/o timeout") ||
+				strings.Contains(err.Error(), "bootstrap is not available yet") {
 				logger.Info("Bootstrap failed, node may still be starting, retrying", "error", err)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
@@ -634,7 +644,7 @@ func (r *ClusterBootstrapReconciler) reconcileBootstrappingCluster(ctx context.C
 		}
 
 		cb.Status.Kubeconfig = base64.StdEncoding.EncodeToString(kubeconfig)
-		cb.Status.ControlPlaneEndpoint = fmt.Sprintf("https://%s:6443", cb.Spec.Network.VIP)
+		cb.Status.ControlPlaneEndpoint = fmt.Sprintf("https://%s:6443", r.resolveControlPlaneEndpoint(cb))
 		if err := r.Status().Update(ctx, cb); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -698,28 +708,36 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 
 	addons := cb.Spec.Addons
 
-	// 1. kube-vip - required for VIP to work
+	// 1. kube-vip - required for VIP to work on on-prem providers.
+	// Cloud providers (gcp, aws, azure) skip kube-vip because cloud networks
+	// do not support gratuitous ARP. Cloud HA uses a cloud load balancer instead.
 	if !r.isAddonInstalled(cb, "kube-vip") {
-		logger.Info("Installing kube-vip")
-		version := "v0.8.7"
-		if addons.ControlPlaneHA != nil && addons.ControlPlaneHA.Version != "" {
-			version = addons.ControlPlaneHA.Version
-		}
+		if cb.Spec.Network.VIP != "" && !cb.IsCloudProvider() {
+			logger.Info("Installing kube-vip")
+			version := "v0.8.7"
+			if addons.ControlPlaneHA != nil && addons.ControlPlaneHA.Version != "" {
+				version = addons.ControlPlaneHA.Version
+			}
 
-		iface := cb.Spec.Network.VIPInterface
-		if iface == "" {
-			iface = r.getDefaultVIPInterface(cb.Spec.Provider)
-		}
+			iface := cb.Spec.Network.VIPInterface
+			if iface == "" {
+				iface = r.getDefaultVIPInterface(cb.Spec.Provider)
+			}
 
-		if err := r.AddonInstaller.InstallKubeVip(ctx, kubeconfig, cb.Spec.Network.VIP, iface, version); err != nil {
-			logger.Error(err, "Failed to install kube-vip")
-			return ctrl.Result{RequeueAfter: requeueShort}, nil
+			if err := r.AddonInstaller.InstallKubeVip(ctx, kubeconfig, cb.Spec.Network.VIP, iface, version); err != nil {
+				logger.Error(err, "Failed to install kube-vip")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			logger.Info("kube-vip installed successfully")
+		} else if cb.IsCloudProvider() {
+			logger.Info("Skipping kube-vip (cloud provider uses cloud load balancer)")
+		} else {
+			logger.Info("Skipping kube-vip (no VIP configured)")
 		}
 
 		r.setAddonInstalled(cb, "kube-vip")
-		logger.Info("kube-vip installed successfully")
 		if err := r.Status().Update(ctx, cb); err != nil {
-			logger.Info("Failed to update status after kube-vip install", "error", err)
+			logger.Info("Failed to update status after kube-vip step", "error", err)
 		}
 	}
 
@@ -743,6 +761,16 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				logger.Info("Failed to update status after Cilium install", "error", err)
 			}
 		}
+	}
+
+	// 2.5 Cloud Controller Manager - skipped for management cluster bootstrap.
+	// Management clusters don't need CCM. Setting --cloud-provider=external
+	// on kubelet adds an "uninitialized" taint that blocks all pod scheduling
+	// until CCM runs, creating a deadlock. Tenant clusters on cloud providers
+	// get CCM installed by butler-controller via CAPI machine templates.
+	if cb.IsCloudProvider() {
+		r.ensureAddonsMap(cb)
+		cb.Status.AddonsInstalled["cloud-controller-manager"] = true
 	}
 
 	// 3. cert-manager - needed by Traefik and Steward webhooks
@@ -812,9 +840,14 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 6. Traefik ingress - after MetalLB so it can get LoadBalancer IP
-	if addons.Ingress == nil || isAddonEnabled(addons.Ingress.Enabled) {
-		if !r.isAddonInstalled(cb, "traefik") {
+	// 6. Traefik ingress - after MetalLB so it can get LoadBalancer IP.
+	// Cloud providers skip Traefik because there is no MetalLB or CCM to
+	// allocate LoadBalancer IPs on the management cluster. Traefik's LB
+	// Service stays <pending> and Helm --wait times out.
+	if !r.isAddonInstalled(cb, "traefik") {
+		if cb.IsCloudProvider() {
+			logger.Info("Skipping Traefik (cloud provider has no MetalLB/CCM for LoadBalancer)")
+		} else if addons.Ingress == nil || isAddonEnabled(addons.Ingress.Enabled) {
 			logger.Info("Installing Traefik")
 			version := ""
 			if addons.Ingress != nil && addons.Ingress.Version != "" {
@@ -826,11 +859,12 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
 
-			r.setAddonInstalled(cb, "traefik")
 			logger.Info("Traefik installed successfully")
-			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Info("Failed to update status after Traefik install", "error", err)
-			}
+		}
+
+		r.setAddonInstalled(cb, "traefik")
+		if err := r.Status().Update(ctx, cb); err != nil {
+			logger.Info("Failed to update status after Traefik step", "error", err)
 		}
 	}
 
@@ -951,7 +985,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		if !r.isAddonInstalled(cb, "butler-crds") {
 			logger.Info("Installing Butler CRDs")
 
-			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig, "0.1.0"); err != nil {
+			if err := r.AddonInstaller.InstallButlerCRDs(ctx, kubeconfig, ""); err != nil {
 				logger.Error(err, "Failed to install Butler CRDs")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
@@ -1187,6 +1221,36 @@ func (r *ClusterBootstrapReconciler) getWorkerIPs(cb *butlerv1alpha1.ClusterBoot
 	return ips
 }
 
+// resolveControlPlaneEndpoint returns the control plane API server endpoint.
+// For on-prem providers with kube-vip, this is the VIP. For cloud providers
+// without VIP, this is the first control plane node's IP.
+func (r *ClusterBootstrapReconciler) resolveControlPlaneEndpoint(cb *butlerv1alpha1.ClusterBootstrap) string {
+	if cb.Spec.Network.VIP != "" {
+		return cb.Spec.Network.VIP
+	}
+	cpIPs := r.getControlPlaneIPs(cb)
+	if len(cpIPs) > 0 {
+		return cpIPs[0]
+	}
+	return ""
+}
+
+// getTalosPlatform maps the bootstrap provider to a Talos platform identifier.
+// Cloud platforms need this so Talos can query instance metadata services for
+// networking configuration and cloud-init data.
+func (r *ClusterBootstrapReconciler) getTalosPlatform(provider string) string {
+	switch provider {
+	case "gcp":
+		return "gcp"
+	case "aws":
+		return "aws"
+	case "azure":
+		return "azure"
+	default:
+		return "" // on-prem providers use the default metal platform
+	}
+}
+
 // getDefaultVIPInterface returns the default network interface name for kube-vip based on provider
 func (r *ClusterBootstrapReconciler) getDefaultVIPInterface(provider string) string {
 	switch provider {
@@ -1196,6 +1260,8 @@ func (r *ClusterBootstrapReconciler) getDefaultVIPInterface(provider string) str
 		return "enp1s0"
 	case "proxmox":
 		return "eth0"
+	case "gcp":
+		return "ens4"
 	default:
 		return "eth0"
 	}
@@ -1267,6 +1333,44 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 			Username: string(secret.Data["username"]),
 			Password: string(secret.Data["password"]),
 		}
+	case "gcp":
+		creds.GCP = &addons.GCPCredentials{
+			ServiceAccountKey: string(secret.Data["serviceAccountKey"]),
+			ProjectID:         providerConfig.Spec.GCP.ProjectID,
+			Region:            providerConfig.Spec.GCP.Region,
+		}
+		if providerConfig.Spec.GCP.Network != "" {
+			creds.GCP.Network = providerConfig.Spec.GCP.Network
+		}
+		logger.Info("Retrieved GCP credentials", "projectID", creds.GCP.ProjectID, "region", creds.GCP.Region)
+	case "aws":
+		creds.AWS = &addons.AWSCredentials{
+			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			SecretAccessKey: string(secret.Data["secretAccessKey"]),
+			Region:          providerConfig.Spec.AWS.Region,
+		}
+		if providerConfig.Spec.AWS.VPCID != "" {
+			creds.AWS.VPCID = providerConfig.Spec.AWS.VPCID
+		}
+		if len(providerConfig.Spec.AWS.SubnetIDs) > 0 {
+			creds.AWS.SubnetID = providerConfig.Spec.AWS.SubnetIDs[0]
+		}
+		if len(providerConfig.Spec.AWS.SecurityGroupIDs) > 0 {
+			creds.AWS.SecurityGroupID = providerConfig.Spec.AWS.SecurityGroupIDs[0]
+		}
+		logger.Info("Retrieved AWS credentials", "region", creds.AWS.Region)
+	case "azure":
+		creds.Azure = &addons.AzureCredentials{
+			ClientID:       string(secret.Data["clientID"]),
+			ClientSecret:   string(secret.Data["clientSecret"]),
+			TenantID:       string(secret.Data["tenantID"]),
+			SubscriptionID: string(secret.Data["subscriptionID"]),
+			ResourceGroup:  providerConfig.Spec.Azure.ResourceGroup,
+			Location:       providerConfig.Spec.Azure.Location,
+			VNetName:       providerConfig.Spec.Azure.VNetName,
+			SubnetName:     providerConfig.Spec.Azure.SubnetName,
+		}
+		logger.Info("Retrieved Azure credentials", "subscriptionID", creds.Azure.SubscriptionID, "resourceGroup", creds.Azure.ResourceGroup)
 	}
 
 	return creds, nil
@@ -1343,6 +1447,59 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 		logger.Info("Extracted Harvester credentials",
 			"namespace", creds.Harvester.Namespace,
 			"networkName", creds.Harvester.NetworkName)
+
+	case "gcp":
+		if providerConfig.Spec.GCP == nil {
+			return nil, fmt.Errorf("ProviderConfig %s has no gcp configuration", providerConfigKey)
+		}
+		creds.GCP = &addons.GCPCredentials{
+			ServiceAccountKey: string(secret.Data["serviceAccountKey"]),
+			ProjectID:         providerConfig.Spec.GCP.ProjectID,
+			Region:            providerConfig.Spec.GCP.Region,
+			Network:           providerConfig.Spec.GCP.Network,
+			Subnetwork:        providerConfig.Spec.GCP.Subnetwork,
+		}
+		logger.Info("Extracted GCP credentials",
+			"projectID", creds.GCP.ProjectID,
+			"region", creds.GCP.Region)
+
+	case "aws":
+		if providerConfig.Spec.AWS == nil {
+			return nil, fmt.Errorf("ProviderConfig %s has no aws configuration", providerConfigKey)
+		}
+		creds.AWS = &addons.AWSCredentials{
+			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			SecretAccessKey: string(secret.Data["secretAccessKey"]),
+			Region:          providerConfig.Spec.AWS.Region,
+			VPCID:           providerConfig.Spec.AWS.VPCID,
+		}
+		if len(providerConfig.Spec.AWS.SubnetIDs) > 0 {
+			creds.AWS.SubnetID = providerConfig.Spec.AWS.SubnetIDs[0]
+		}
+		if len(providerConfig.Spec.AWS.SecurityGroupIDs) > 0 {
+			creds.AWS.SecurityGroupID = providerConfig.Spec.AWS.SecurityGroupIDs[0]
+		}
+		logger.Info("Extracted AWS credentials",
+			"region", creds.AWS.Region,
+			"vpcID", creds.AWS.VPCID)
+
+	case "azure":
+		if providerConfig.Spec.Azure == nil {
+			return nil, fmt.Errorf("ProviderConfig %s has no azure configuration", providerConfigKey)
+		}
+		creds.Azure = &addons.AzureCredentials{
+			ClientID:       string(secret.Data["clientID"]),
+			ClientSecret:   string(secret.Data["clientSecret"]),
+			TenantID:       string(secret.Data["tenantID"]),
+			SubscriptionID: string(secret.Data["subscriptionID"]),
+			ResourceGroup:  providerConfig.Spec.Azure.ResourceGroup,
+			Location:       providerConfig.Spec.Azure.Location,
+			VNetName:       providerConfig.Spec.Azure.VNetName,
+			SubnetName:     providerConfig.Spec.Azure.SubnetName,
+		}
+		logger.Info("Extracted Azure credentials",
+			"subscriptionID", creds.Azure.SubscriptionID,
+			"resourceGroup", creds.Azure.ResourceGroup)
 
 	default:
 		logger.Info("Unknown or unsupported provider type", "provider", cb.Spec.Provider)
@@ -1497,10 +1654,12 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 	// When multi-arch support is added, this should read from the ClusterBootstrap spec.
 	arch := "amd64"
 	// Platform is the artifact name prefix in the factory URL.
-	// For Butler Image Factory: use "talos" (bootstrap always uses Talos).
-	// For Siderolabs factory (factory.talos.dev): use "nocloud" (or metal, vmware, etc.).
-	// Bootstrap always uses Talos for management clusters.
+	// Platform for ImageSync. On-prem uses "talos" (Butler Image Factory naming).
+	// Cloud providers use the cloud platform name for cloud-specific image variants.
 	platform := "talos"
+	if cb.IsCloudProvider() {
+		platform = cb.Spec.Provider
+	}
 
 	// Truncate schematicID to 63 chars for label value (Kubernetes label limit)
 	labelSchematicID := schematicID

@@ -13,10 +13,22 @@ RUN apk add --no-cache git make
 ARG TARGETOS
 ARG TARGETARCH
 
-COPY go.mod go.sum ./
+# REPO_DIR: set to subdirectory name when building with parent context
+# (e.g., REPO_DIR=butler-bootstrap when context is the repo root).
+# Defaults to "." for standard builds where context is the repo itself.
+ARG REPO_DIR=.
+
+COPY ${REPO_DIR}/go.mod ${REPO_DIR}/go.sum ./
+
+# go.mod has: replace github.com/butlerdotdev/butler-api => ../butler-api
+# Copy butler-api module source so the replace directive resolves.
+# /workspace is our WORKDIR, so ../butler-api resolves to /butler-api.
+COPY butler-api/go.mod butler-api/go.sum /butler-api/
+COPY butler-api/api/ /butler-api/api/
+
 RUN go mod download
 
-COPY . .
+COPY ${REPO_DIR}/ .
 
 RUN CGO_ENABLED=0 \
     GOOS=${TARGETOS} \

@@ -96,6 +96,38 @@ func (c *Client) GenerateConfig(ctx context.Context, opts controller.TalosConfig
 	// Disable kube-proxy (Cilium handles this)
 	args = append(args, "--config-patch", `[{"op": "add", "path": "/cluster/proxy", "value": {"disabled": true}}]`)
 
+	// Cloud platforms: Talos auto-detects the platform from the VM environment
+	// (GCP metadata service, AWS IMDS, Azure IMDS). No config patch needed.
+	// Note: --cloud-provider=external is NOT set for management clusters.
+	// It adds an "uninitialized" taint that blocks all pods until CCM runs,
+	// but management clusters don't need CCM. Tenant clusters on cloud
+	// providers get --cloud-provider=external via CAPI machine templates.
+
+	// Add certSANs for control plane IPs and VIP so the Talos API
+	// certificate includes IPs used for remote connections. On cloud
+	// providers, nodes only see their internal IP but connections arrive
+	// via external/NAT IPs that must be in the certificate SANs.
+	var certSANs []string
+	seen := make(map[string]bool)
+	if opts.ControlPlaneVIP != "" {
+		certSANs = append(certSANs, opts.ControlPlaneVIP)
+		seen[opts.ControlPlaneVIP] = true
+	}
+	for _, ip := range opts.ControlPlaneIPs {
+		if !seen[ip] {
+			certSANs = append(certSANs, ip)
+			seen[ip] = true
+		}
+	}
+	if len(certSANs) > 0 {
+		var quoted []string
+		for _, san := range certSANs {
+			quoted = append(quoted, fmt.Sprintf(`"%s"`, san))
+		}
+		sansJSON := "[" + strings.Join(quoted, ",") + "]"
+		args = append(args, "--config-patch", fmt.Sprintf(`[{"op": "add", "path": "/machine/certSANs", "value": %s}]`, sansJSON))
+	}
+
 	// Allow scheduling on control planes for single-node clusters
 	// This enables workloads to run on the single control plane node
 	if opts.AllowSchedulingOnControlPlanes {
@@ -198,10 +230,10 @@ func (c *Client) Bootstrap(ctx context.Context, nodeIP string) error {
 	logger := log.FromContext(ctx)
 
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
-			logger.Info("Retrying bootstrap after clock skew error", "attempt", attempt+1)
-			time.Sleep(5 * time.Second)
+			logger.Info("Retrying bootstrap", "attempt", attempt+1)
+			time.Sleep(10 * time.Second)
 		}
 
 		args := []string{
@@ -225,8 +257,11 @@ func (c *Client) Bootstrap(ctx context.Context, nodeIP string) error {
 				logger.Info("Cluster already bootstrapped")
 				return nil
 			}
-			// Retry on clock skew / cert not yet valid errors
-			if strings.Contains(outputStr, "certificate has expired or is not yet valid") {
+			// Retry on transient errors (clock skew, node still initializing)
+			if strings.Contains(outputStr, "certificate has expired or is not yet valid") ||
+				strings.Contains(outputStr, "bootstrap is not available yet") ||
+				strings.Contains(outputStr, "connection refused") ||
+				strings.Contains(outputStr, "connection reset") {
 				lastErr = fmt.Errorf("talosctl bootstrap failed: %w, output: %s", err, outputStr)
 				continue
 			}
