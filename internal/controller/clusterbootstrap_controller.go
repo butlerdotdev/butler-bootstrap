@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -123,6 +124,8 @@ type AddonInstallerInterface interface {
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=providerconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=butlerconfigs,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=imagesyncs,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=loadbalancerrequests,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=loadbalancerrequests/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
 
 func (r *ClusterBootstrapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -348,7 +351,7 @@ func (r *ClusterBootstrapReconciler) reconcileProvisioningMachines(ctx context.C
 	// Update LB targets with running control plane instances
 	if cb.IsCloudProvider() && !isSingleNode {
 		if err := r.updateLoadBalancerTargets(ctx, cb); err != nil {
-			logger.Info("Failed to update LB targets", "error", err)
+			logger.Error(err, "Failed to update LB targets")
 		}
 	}
 
@@ -482,6 +485,19 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 
 		endpoint := r.resolveControlPlaneEndpoint(ctx, cb)
 		if endpoint == "" {
+			// For cloud HA, check if the LBR has failed so we don't requeue forever.
+			if cb.IsCloudProvider() && !cb.IsSingleNode() {
+				lbr := &butlerv1alpha1.LoadBalancerRequest{}
+				if err := r.Get(ctx, client.ObjectKey{Name: lbrName(cb), Namespace: cb.Namespace}, lbr); err == nil && lbr.IsFailed() {
+					msg := lbr.Status.FailureMessage
+					if msg == "" {
+						msg = "LoadBalancerRequest failed with no message"
+					}
+					r.setFailure(cb, "LoadBalancerFailed", fmt.Sprintf("Control plane LB %s failed: %s", lbrName(cb), msg))
+					r.Status().Update(ctx, cb)
+					return ctrl.Result{}, nil
+				}
+			}
 			logger.Info("Control plane endpoint not yet available (no VIP and no CP IPs discovered), requeueing")
 			return ctrl.Result{RequeueAfter: requeueShort}, nil
 		}
@@ -518,12 +534,21 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 		// IP as local to accept the traffic. Adding it to the loopback
 		// interface achieves this without conflicting with the primary NIC.
 		if cb.IsCloudProvider() && !cb.IsSingleNode() && endpoint != "" {
-			logger.Info("Adding cloud LB IP to CP loopback interface", "ip", endpoint)
-			opts.ControlPlaneConfigPatches = append(opts.ControlPlaneConfigPatches, ConfigPatch{
-				Op:    "add",
-				Path:  "/machine/network/interfaces",
-				Value: fmt.Sprintf(`[{"interface":"lo","addresses":["%s/32"]}]`, endpoint),
-			})
+			if net.ParseIP(endpoint) == nil {
+				logger.Info("Skipping loopback patch: endpoint is a DNS name, not an IP", "endpoint", endpoint)
+			} else {
+				// NOTE: This uses "add" which will replace any existing /machine/network/interfaces
+				// configuration. This is acceptable for cloud bootstrap because Talos auto-discovers
+				// the primary interface via the cloud platform metadata service (IMDS) rather than
+				// static config. If custom interface patches are needed, they should be applied
+				// after bootstrap via talosctl.
+				logger.Info("Adding cloud LB IP to CP loopback interface", "ip", endpoint)
+				opts.ControlPlaneConfigPatches = append(opts.ControlPlaneConfigPatches, ConfigPatch{
+					Op:    "add",
+					Path:  "/machine/network/interfaces",
+					Value: fmt.Sprintf(`[{"interface":"lo","addresses":["%s/32"]}]`, endpoint),
+				})
+			}
 		}
 
 		configs, err := r.TalosClient.GenerateConfig(ctx, opts)
@@ -1266,8 +1291,7 @@ func (r *ClusterBootstrapReconciler) resolveControlPlaneEndpoint(ctx context.Con
 	// endpoint is permanently baked in.
 	if cb.IsCloudProvider() && !cb.IsSingleNode() {
 		lbr := &butlerv1alpha1.LoadBalancerRequest{}
-		lbrName := cb.Spec.Cluster.Name + "-cp-lb"
-		err := r.Get(ctx, client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr)
+		err := r.Get(ctx, client.ObjectKey{Name: lbrName(cb), Namespace: cb.Namespace}, lbr)
 		if err == nil && lbr.IsReady() && lbr.Status.Endpoint != "" {
 			return lbr.Status.Endpoint
 		}
@@ -1553,6 +1577,11 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 	}
 
 	return creds, nil
+}
+
+// lbrName returns the LoadBalancerRequest name for a ClusterBootstrap's control plane LB.
+func lbrName(cb *butlerv1alpha1.ClusterBootstrap) string {
+	return cb.Spec.Cluster.Name + "-cp-lb"
 }
 
 func boolPtr(b bool) *bool {
@@ -1844,9 +1873,9 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 func (r *ClusterBootstrapReconciler) ensureLoadBalancerRequest(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
 	logger := log.FromContext(ctx)
 
-	lbrName := cb.Spec.Cluster.Name + "-cp-lb"
+	name := lbrName(cb)
 	lbr := &butlerv1alpha1.LoadBalancerRequest{}
-	err := r.Get(ctx, client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr)
+	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: cb.Namespace}, lbr)
 	if err == nil {
 		return nil // Already exists
 	}
@@ -1856,7 +1885,7 @@ func (r *ClusterBootstrapReconciler) ensureLoadBalancerRequest(ctx context.Conte
 
 	lbr = &butlerv1alpha1.LoadBalancerRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      lbrName,
+			Name:      name,
 			Namespace: cb.Namespace,
 			Labels: map[string]string{
 				"butler.butlerlabs.dev/cluster-bootstrap": cb.Name,
@@ -1887,10 +1916,10 @@ func (r *ClusterBootstrapReconciler) ensureLoadBalancerRequest(ctx context.Conte
 		if errors.IsAlreadyExists(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to create LoadBalancerRequest %s: %w", lbrName, err)
+		return fmt.Errorf("failed to create LoadBalancerRequest %s: %w", name, err)
 	}
 
-	logger.Info("Created LoadBalancerRequest for cloud HA control plane", "name", lbrName)
+	logger.Info("Created LoadBalancerRequest for cloud HA control plane", "name", name)
 	return nil
 }
 
@@ -1900,10 +1929,10 @@ func (r *ClusterBootstrapReconciler) ensureLoadBalancerRequest(ctx context.Conte
 func (r *ClusterBootstrapReconciler) updateLoadBalancerTargets(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
 	logger := log.FromContext(ctx)
 
-	lbrName := cb.Spec.Cluster.Name + "-cp-lb"
+	name := lbrName(cb)
 	lbr := &butlerv1alpha1.LoadBalancerRequest{}
-	if err := r.Get(ctx, client.ObjectKey{Name: lbrName, Namespace: cb.Namespace}, lbr); err != nil {
-		return fmt.Errorf("failed to get LoadBalancerRequest %s: %w", lbrName, err)
+	if err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: cb.Namespace}, lbr); err != nil {
+		return fmt.Errorf("failed to get LoadBalancerRequest %s: %w", name, err)
 	}
 
 	var targets []butlerv1alpha1.LoadBalancerTarget
@@ -1947,7 +1976,7 @@ func (r *ClusterBootstrapReconciler) updateLoadBalancerTargets(ctx context.Conte
 		return fmt.Errorf("failed to update LoadBalancerRequest targets: %w", err)
 	}
 
-	logger.Info("Updated LoadBalancerRequest targets", "name", lbrName, "targetCount", len(targets))
+	logger.Info("Updated LoadBalancerRequest targets", "name", name, "targetCount", len(targets))
 	return nil
 }
 
