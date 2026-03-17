@@ -776,7 +776,7 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 	defer cleanup()
 
 	if version == "" {
-		version = "0.1.0"
+		version = "0.3.0"
 	}
 
 	logger.Info("Installing Steward", "version", version)
