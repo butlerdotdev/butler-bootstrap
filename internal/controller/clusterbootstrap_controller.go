@@ -1920,25 +1920,34 @@ func (r *ClusterBootstrapReconciler) updateLoadBalancerTargets(ctx context.Conte
 		if m.IPAddress == "" {
 			continue
 		}
-		targets = append(targets, butlerv1alpha1.LoadBalancerTarget{
+		target := butlerv1alpha1.LoadBalancerTarget{
 			IP:           m.IPAddress,
 			InstanceName: m.Name,
-		})
+		}
+		// Look up MachineRequest to get provider-specific instance ID
+		// (e.g., EC2 instance ID for AWS NLB target registration).
+		mr := &butlerv1alpha1.MachineRequest{}
+		if err := r.Get(ctx, client.ObjectKey{Name: m.Name, Namespace: cb.Namespace}, mr); err == nil {
+			if mr.Status.ProviderID != "" {
+				target.InstanceID = mr.Status.ProviderID
+			}
+		}
+		targets = append(targets, target)
 	}
 
 	if len(targets) == 0 {
 		return nil
 	}
 
-	// Only update if targets changed
+	// Only update if targets changed (check IP and InstanceID)
 	if len(targets) == len(lbr.Spec.Targets) {
 		changed := false
-		existing := make(map[string]bool)
+		existing := make(map[string]string) // IP -> InstanceID
 		for _, t := range lbr.Spec.Targets {
-			existing[t.IP] = true
+			existing[t.IP] = t.InstanceID
 		}
 		for _, t := range targets {
-			if !existing[t.IP] {
+			if existingID, ok := existing[t.IP]; !ok || existingID != t.InstanceID {
 				changed = true
 				break
 			}
