@@ -511,11 +511,13 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 			TalosVersion:                   cb.Spec.Talos.Version,
 			InstallDisk:                    cb.Spec.Talos.InstallDisk,
 			Platform:                       r.getTalosPlatform(cb.Spec.Provider),
-			AllowSchedulingOnControlPlanes: cb.IsSingleNode(), // Enable for single-node
+			AllowSchedulingOnControlPlanes: cb.IsSingleNode() || cb.Spec.Cluster.Workers == nil || cb.Spec.Cluster.Workers.Replicas == 0,
 		}
 
 		if cb.IsSingleNode() {
 			logger.Info("Single-node mode: enabling workload scheduling on control planes")
+		} else if cb.Spec.Cluster.Workers == nil || cb.Spec.Cluster.Workers.Replicas == 0 {
+			logger.Info("No workers configured: enabling workload scheduling on control planes")
 		}
 
 		// Convert config patches
