@@ -766,16 +766,16 @@ func (i *Installer) applyManifest(ctx context.Context, kubeconfigPath string, ma
 // nodeProviderIDs maps private IP addresses to provider-format providerID strings
 // (e.g., "10.0.1.36" -> "aws:///us-east-1a/i-abc123"). The method lists nodes,
 // matches by InternalIP, and patches each node via kubectl.
-func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) error {
+func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) (int, error) {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer cleanup()
 
 	if len(nodeProviderIDs) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Get all nodes with their InternalIPs via kubectl
@@ -791,7 +791,7 @@ func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, p
 	cmd := exec.CommandContext(ctx, i.KubectlPath, args...)
 	rawOutput, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to list nodes: %w", err)
+		return 0, fmt.Errorf("failed to list nodes: %w", err)
 	}
 	output := string(rawOutput)
 
@@ -815,13 +815,13 @@ func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, p
 		patchJSON := fmt.Sprintf(`{"spec":{"providerID":"%s"}}`, providerID)
 		if err := i.runKubectl(ctx, kubeconfigPath, "patch", "node", nodeName,
 			"--type", "merge", "-p", patchJSON); err != nil {
-			return fmt.Errorf("failed to patch node %s providerID: %w", nodeName, err)
+			return patched, fmt.Errorf("failed to patch node %s providerID: %w", nodeName, err)
 		}
 		patched++
 	}
 
 	logger.Info("Node providerIDs patched", "patched", patched, "total", len(nodeProviderIDs))
-	return nil
+	return patched, nil
 }
 
 // InstallTraefik installs Traefik ingress controller

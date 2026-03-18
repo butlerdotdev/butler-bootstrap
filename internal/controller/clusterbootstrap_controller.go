@@ -114,7 +114,7 @@ type AddonInstallerInterface interface {
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
 	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error)
-	SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) error
+	SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) (int, error)
 }
 
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=clusterbootstraps,verbs=get;list;watch;create;update;patch;delete
@@ -924,22 +924,35 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		// --cloud-provider=external on kubelet, nodes lack providerID by default.
 		// Build a mapping from private IP to AWS-format providerID using
 		// MachineRequest status (instance IDs + private IPs from IPAddresses).
+		// This step re-runs until all expected nodes are patched, since not all
+		// nodes may have joined the cluster when CCM is first installed.
 		if !r.isAddonInstalled(cb, "node-provider-ids") {
 			nodeProviderIDs, err := r.buildNodeProviderIDMap(ctx, cb)
 			if err != nil {
 				logger.Error(err, "Failed to build node providerID map")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
+			patchedCount := 0
 			if len(nodeProviderIDs) > 0 {
-				if err := r.AddonInstaller.SetNodeProviderIDs(ctx, kubeconfig, string(cb.Spec.Provider), nodeProviderIDs); err != nil {
-					logger.Error(err, "Failed to set node providerIDs")
+				var patchErr error
+				patchedCount, patchErr = r.AddonInstaller.SetNodeProviderIDs(ctx, kubeconfig, string(cb.Spec.Provider), nodeProviderIDs)
+				if patchErr != nil {
+					logger.Error(patchErr, "Failed to set node providerIDs")
 					return ctrl.Result{RequeueAfter: requeueShort}, nil
 				}
-				logger.Info("Node providerIDs set", "count", len(nodeProviderIDs))
 			}
-			r.setAddonInstalled(cb, "node-provider-ids")
-			if err := r.Status().Update(ctx, cb); err != nil {
-				logger.Error(err, "Failed to update status after setting providerIDs")
+			// Only mark complete when all expected nodes have been patched.
+			expectedNodes := int(cb.GetControlPlaneReplicas()) + int(cb.Spec.Cluster.Workers.Replicas)
+			if patchedCount >= expectedNodes {
+				r.setAddonInstalled(cb, "node-provider-ids")
+				logger.Info("All node providerIDs set", "count", len(nodeProviderIDs))
+				if err := r.Status().Update(ctx, cb); err != nil {
+					logger.Error(err, "Failed to update status after setting providerIDs")
+				}
+			} else {
+				logger.Info("Waiting for all nodes to join before completing providerID setup",
+					"patched", patchedCount, "expected", expectedNodes)
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
 		}
 	}
