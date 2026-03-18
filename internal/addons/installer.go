@@ -649,7 +649,7 @@ func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfi
 	case "aws":
 		return i.installAWSCCM(ctx, kubeconfigPath, creds)
 	case "gcp":
-		return i.installGCPCCM(ctx, kubeconfigPath)
+		return i.installGCPCCM(ctx, kubeconfigPath, creds)
 	case "azure":
 		return i.installAzureCCM(ctx, kubeconfigPath)
 	default:
@@ -705,17 +705,78 @@ stringData:
 	)
 }
 
-func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string) error {
-	// GCP CCM implementation deferred. Helm chart maturity is a risk;
-	// may need embedded manifest fallback. See plan for details.
+func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
+	if creds == nil || creds.GCP == nil {
+		return fmt.Errorf("GCP credentials required for CCM installation")
+	}
+
+	// Create cloud-config ConfigMap
+	network := creds.GCP.Network
+	if network == "" {
+		network = "default"
+	}
+	cloudConfig := fmt.Sprintf(`[global]
+project-id = %s
+network-name = %s
+regional = true
+`, creds.GCP.ProjectID, network)
+
+	configMapManifest := fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gcp-cloud-config
+  namespace: kube-system
+data:
+  cloud-config: |
+%s`, indentString(cloudConfig, "    "))
+
+	if err := i.applyManifest(ctx, kubeconfigPath, configMapManifest, "ccm-gcp-config"); err != nil {
+		return fmt.Errorf("failed to create GCP cloud-config ConfigMap: %w", err)
+	}
+
+	// Create service account key Secret
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: gcp-cloud-credentials
+  namespace: kube-system
+type: Opaque
+stringData:
+  key.json: '%s'
+`, strings.ReplaceAll(creds.GCP.ServiceAccountKey, "'", "''"))
+
+	if err := i.applyManifest(ctx, kubeconfigPath, secretManifest, "ccm-gcp-secret"); err != nil {
+		return fmt.Errorf("failed to create GCP CCM credentials Secret: %w", err)
+	}
+	logger.Info("Created GCP CCM credentials")
+
 	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
 		"https://kubernetes-sigs.github.io/cloud-provider-gcp")
 	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+
 	return i.runHelm(ctx, kubeconfigPath,
 		"upgrade", "--install", "cloud-controller-manager",
 		"cloud-provider-gcp/cloud-provider-gcp",
 		"--namespace", "kube-system",
-		"--wait", "--timeout", "5m")
+		"--set", "cloudConfigPath=/etc/kubernetes/cloud-config",
+		"--set", "extraVolumes[0].name=cloud-config",
+		"--set", "extraVolumes[0].configMap.name=gcp-cloud-config",
+		"--set", "extraVolumeMounts[0].name=cloud-config",
+		"--set", "extraVolumeMounts[0].mountPath=/etc/kubernetes/cloud-config",
+		"--set", "extraVolumeMounts[0].subPath=cloud-config",
+		"--set", "extraVolumeMounts[0].readOnly=true",
+		"--set", "extraVolumes[1].name=gcp-creds",
+		"--set", "extraVolumes[1].secret.secretName=gcp-cloud-credentials",
+		"--set", "extraVolumeMounts[1].name=gcp-creds",
+		"--set", "extraVolumeMounts[1].mountPath=/etc/kubernetes/gcp",
+		"--set", "extraVolumeMounts[1].readOnly=true",
+		"--set", "extraEnvVars[0].name=GOOGLE_APPLICATION_CREDENTIALS",
+		"--set", "extraEnvVars[0].value=/etc/kubernetes/gcp/key.json",
+		"--set", "nodeSelector=null",
+		"--set", "tolerations[0].operator=Exists",
+		"--wait", "--timeout", "5m",
+	)
 }
 
 func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string) error {
@@ -729,6 +790,17 @@ func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string) 
 		"cloud-provider-azure/cloud-controller-manager",
 		"--namespace", "kube-system",
 		"--wait", "--timeout", "5m")
+}
+
+// indentString indents each line of s with the given prefix.
+func indentString(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = prefix + line
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // applyManifest writes a YAML manifest to a temp file and applies it via kubectl.
