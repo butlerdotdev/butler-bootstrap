@@ -421,7 +421,7 @@ func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, c
 			CPU:         pool.CPU,
 			MemoryMB:    pool.MemoryMB,
 			DiskGB:      pool.DiskGB,
-			Labels:      pool.Labels,
+			Labels:      r.buildMachineLabels(cb, pool.Labels),
 			Image:       imageOverride,
 		},
 	}
@@ -432,6 +432,21 @@ func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, c
 
 	logger.Info("Created MachineRequest", "name", name, "role", role, "image", imageOverride)
 	return nil
+}
+
+// buildMachineLabels merges pool labels with cloud provider tags.
+// AWS CCM requires kubernetes.io/cluster/<name> tags on EC2 instances for
+// service controller instance discovery. The tag is injected here and flows
+// through to provider VM tags via MachineRequest.Spec.Labels.
+func (r *ClusterBootstrapReconciler) buildMachineLabels(cb *butlerv1alpha1.ClusterBootstrap, poolLabels map[string]string) map[string]string {
+	labels := make(map[string]string)
+	for k, v := range poolLabels {
+		labels[k] = v
+	}
+	if cb.IsCloudProvider() {
+		labels[fmt.Sprintf("kubernetes.io/cluster/%s", cb.Spec.Cluster.Name)] = "owned"
+	}
+	return labels
 }
 
 func (r *ClusterBootstrapReconciler) updateMachineStatuses(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
