@@ -2114,6 +2114,13 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 		}
 	}
 
+	// Cloud providers use LoadBalancer instead of ClusterIP. CCM (installed
+	// earlier in the addon sequence) provisions the cloud-native LB.
+	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
+	if isCloud {
+		values = append(values, "frontend.service.type=LoadBalancer")
+	}
+
 	// Build helm install args - USE OCI REGISTRY
 	args := []string{
 		"upgrade", "--install",
@@ -2132,6 +2139,18 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 
 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
 		return "", fmt.Errorf("failed to install butler-console: %w", err)
+	}
+
+	// AWS: annotate the frontend Service for NLB instead of the default CLB.
+	// Applied via kubectl because the butler-console chart does not template
+	// service annotations. CCM will reconcile the CLB to an NLB.
+	if provider == "aws" {
+		if err := i.runKubectl(ctx, kubeconfigPath, "annotate", "svc", "butler-console-frontend",
+			"-n", "butler-system",
+			"service.beta.kubernetes.io/aws-load-balancer-type=nlb",
+			"--overwrite"); err != nil {
+			logger.Error(err, "Failed to annotate console service for NLB, falling back to CLB")
+		}
 	}
 
 	// Wait for deployments
