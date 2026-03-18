@@ -634,12 +634,6 @@ spec:
 }
 
 // InstallCloudControllerManager installs the cloud-specific CCM via Helm.
-// CCM provides LoadBalancer service support by provisioning cloud-native load
-// balancers and managing associated security group / firewall rules.
-//
-// Management clusters run CCM in service-controller-only mode (no
-// --cloud-provider=external on kubelet). CCM handles LoadBalancer Services
-// but skips node lifecycle management, which Talos handles directly.
 func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
@@ -670,8 +664,6 @@ func (i *Installer) installAWSCCM(ctx context.Context, kubeconfigPath string, cr
 		return fmt.Errorf("AWS credentials required for CCM installation")
 	}
 
-	// Create credential Secret in kube-system on the management cluster.
-	// The CCM helm chart references this Secret for AWS API access.
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
 metadata:
@@ -703,17 +695,10 @@ stringData:
 		"--set", "env[1].valueFrom.secretKeyRef.name=aws-cloud-credentials",
 		"--set", "env[1].valueFrom.secretKeyRef.key=secret-access-key",
 		"--set", fmt.Sprintf("env[2].name=AWS_DEFAULT_REGION,env[2].value=%s", creds.AWS.Region),
-		// Override default args to disable cloud route management. The route
-		// controller requires a cluster CIDR (--cluster-cidr) and crashes without
-		// one. Management clusters use Cilium for pod networking, not cloud routes.
-		// All other controllers (service, cloud-node, cloud-node-lifecycle) run
-		// normally. cloud-node-controller is required to set spec.providerID on
-		// nodes, which the service controller needs for NLB target registration.
+		// Disable route controller (requires --cluster-cidr; Cilium handles pod networking)
 		"--set", "args[0]=--v=2",
 		"--set", "args[1]=--cloud-provider=aws",
 		"--set", "args[2]=--configure-cloud-routes=false",
-		// Talos nodes may not have standard role labels. Clear nodeSelector
-		// to allow scheduling on any node, and tolerate all taints.
 		"--set", "nodeSelector=null",
 		"--set", "tolerations[0].operator=Exists",
 		"--wait", "--timeout", "5m",
@@ -762,10 +747,8 @@ func (i *Installer) applyManifest(ctx context.Context, kubeconfigPath string, ma
 	return i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name())
 }
 
-// SetNodeProviderIDs patches spec.providerID on management cluster nodes.
-// nodeProviderIDs maps private IP addresses to provider-format providerID strings
-// (e.g., "10.0.1.36" -> "aws:///us-east-1a/i-abc123"). The method lists nodes,
-// matches by InternalIP, and patches each node via kubectl.
+// SetNodeProviderIDs patches spec.providerID on management cluster nodes by
+// matching InternalIP to the provided privateIP->providerID mapping.
 func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) (int, error) {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
@@ -778,7 +761,6 @@ func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, p
 		return 0, nil
 	}
 
-	// Get all nodes with their InternalIPs via kubectl
 	args := []string{
 		"--kubeconfig", kubeconfigPath,
 		"--insecure-skip-tls-verify",
@@ -795,7 +777,6 @@ func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, p
 	}
 	output := string(rawOutput)
 
-	// Parse node name -> internal IP
 	patched := 0
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		parts := strings.SplitN(line, "\t", 2)
@@ -2186,13 +2167,6 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 		}
 	}
 
-	// Cloud providers use LoadBalancer instead of ClusterIP. CCM (installed
-	// earlier in the addon sequence) provisions the cloud-native LB.
-	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
-	if isCloud {
-		values = append(values, "frontend.service.type=LoadBalancer")
-	}
-
 	// Build helm install args - USE OCI REGISTRY
 	args := []string{
 		"upgrade", "--install",
@@ -2213,15 +2187,18 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 		return "", fmt.Errorf("failed to install butler-console: %w", err)
 	}
 
-	// AWS: annotate the frontend Service for NLB instead of the default CLB.
-	// Applied via kubectl because the butler-console chart does not template
-	// service annotations. CCM will reconcile the CLB to an NLB.
-	if provider == "aws" {
-		if err := i.runKubectl(ctx, kubeconfigPath, "annotate", "svc", "butler-console-frontend",
-			"-n", "butler-system",
-			"service.beta.kubernetes.io/aws-load-balancer-type=nlb",
-			"--overwrite"); err != nil {
-			logger.Error(err, "Failed to annotate console service for NLB, falling back to CLB")
+	// Patch service to LoadBalancer with provider-specific annotations atomically.
+	// Helm installs as ClusterIP; we patch annotation + type together so CCM
+	// creates the correct LB type on first observation (no orphaned CLB).
+	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
+	if isCloud {
+		patch := `{"spec":{"type":"LoadBalancer"}`
+		if provider == "aws" {
+			patch = `{"metadata":{"annotations":{"service.beta.kubernetes.io/aws-load-balancer-type":"nlb"}},"spec":{"type":"LoadBalancer"}}`
+		}
+		if err := i.runKubectl(ctx, kubeconfigPath, "patch", "svc", "butler-console-frontend",
+			"-n", "butler-system", "--type", "merge", "-p", patch); err != nil {
+			logger.Error(err, "Failed to patch console service to LoadBalancer")
 		}
 	}
 
@@ -2259,8 +2236,7 @@ func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath st
 		return fmt.Sprintf("%s://%s", scheme, host)
 	}
 
-	// Cloud LoadBalancers take time to provision. Poll for up to 5 minutes.
-	// AWS returns a hostname; GCP and Azure return an IP.
+	// Poll for cloud LoadBalancer endpoint (up to 5 minutes)
 	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
 	if isCloud {
 		logger.Info("Waiting for cloud LoadBalancer endpoint")
@@ -2285,7 +2261,7 @@ func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath st
 		logger.Info("Console LoadBalancer not ready after 5 minutes, falling back to port-forward instructions")
 	}
 
-	// On-prem: try MetalLB-assigned LoadBalancer IP (single attempt)
+	// On-prem: check for MetalLB-assigned IP
 	if ip, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].ip}"); err == nil && ip != "" {
 		return fmt.Sprintf("http://%s", ip)
 	}
@@ -2294,7 +2270,6 @@ func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath st
 }
 
 // getServiceField extracts a jsonpath field from the console frontend Service.
-// Returns ("", nil) if the field is empty/unset. Returns ("", err) on kubectl failure.
 func (i *Installer) getServiceField(ctx context.Context, kubeconfigPath string, jsonpath string) (string, error) {
 	args := []string{
 		"--kubeconfig", kubeconfigPath,
