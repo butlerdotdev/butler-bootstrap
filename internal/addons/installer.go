@@ -25,6 +25,7 @@ import (
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
 	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
+	"github.com/go-logr/logr"
 
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -633,7 +634,12 @@ spec:
 }
 
 // InstallCloudControllerManager installs the cloud-specific CCM via Helm.
-// CCM is required for LoadBalancer services to get external IPs on cloud providers.
+// CCM provides LoadBalancer service support by provisioning cloud-native load
+// balancers and managing associated security group / firewall rules.
+//
+// Management clusters run CCM in service-controller-only mode (no
+// --cloud-provider=external on kubelet). CCM handles LoadBalancer Services
+// but skips node lifecycle management, which Talos handles directly.
 func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
@@ -646,37 +652,104 @@ func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfi
 	i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "kube-system")
 
 	switch provider {
-	case "gcp":
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
-			"https://kubernetes-sigs.github.io/cloud-provider-gcp")
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-		return i.runHelm(ctx, kubeconfigPath,
-			"upgrade", "--install", "cloud-controller-manager",
-			"cloud-provider-gcp/cloud-provider-gcp",
-			"--namespace", "kube-system",
-			"--wait", "--timeout", "5m")
 	case "aws":
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "aws-cloud-controller-manager",
-			"https://kubernetes.github.io/cloud-provider-aws")
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-		return i.runHelm(ctx, kubeconfigPath,
-			"upgrade", "--install", "aws-cloud-controller-manager",
-			"aws-cloud-controller-manager/aws-cloud-controller-manager",
-			"--namespace", "kube-system",
-			"--wait", "--timeout", "5m")
+		return i.installAWSCCM(ctx, kubeconfigPath, creds, logger)
+	case "gcp":
+		return i.installGCPCCM(ctx, kubeconfigPath, creds, logger)
 	case "azure":
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",
-			"https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/helm/repo")
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-		return i.runHelm(ctx, kubeconfigPath,
-			"upgrade", "--install", "cloud-controller-manager",
-			"cloud-provider-azure/cloud-controller-manager",
-			"--namespace", "kube-system",
-			"--wait", "--timeout", "5m")
+		return i.installAzureCCM(ctx, kubeconfigPath, creds, logger)
 	default:
 		logger.Info("No CCM needed for provider", "provider", provider)
 		return nil
 	}
+}
+
+func (i *Installer) installAWSCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials, logger logr.Logger) error {
+	if creds == nil || creds.AWS == nil {
+		return fmt.Errorf("AWS credentials required for CCM installation")
+	}
+
+	// Create credential Secret in kube-system on the management cluster.
+	// The CCM helm chart references this Secret for AWS API access.
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-cloud-credentials
+  namespace: kube-system
+type: Opaque
+stringData:
+  access-key-id: "%s"
+  secret-access-key: "%s"
+`, creds.AWS.AccessKeyID, creds.AWS.SecretAccessKey)
+
+	if err := i.applyManifest(ctx, kubeconfigPath, secretManifest, "ccm-aws-secret"); err != nil {
+		return fmt.Errorf("failed to create AWS CCM credentials Secret: %w", err)
+	}
+	logger.Info("Created AWS CCM credentials Secret")
+
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "aws-cloud-controller-manager",
+		"https://kubernetes.github.io/cloud-provider-aws")
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+
+	return i.runHelm(ctx, kubeconfigPath,
+		"upgrade", "--install", "aws-cloud-controller-manager",
+		"aws-cloud-controller-manager/aws-cloud-controller-manager",
+		"--namespace", "kube-system",
+		"--set", "env[0].name=AWS_ACCESS_KEY_ID",
+		"--set", "env[0].valueFrom.secretKeyRef.name=aws-cloud-credentials",
+		"--set", "env[0].valueFrom.secretKeyRef.key=access-key-id",
+		"--set", "env[1].name=AWS_SECRET_ACCESS_KEY",
+		"--set", "env[1].valueFrom.secretKeyRef.name=aws-cloud-credentials",
+		"--set", "env[1].valueFrom.secretKeyRef.key=secret-access-key",
+		"--set", fmt.Sprintf("env[2].name=AWS_DEFAULT_REGION,env[2].value=%s", creds.AWS.Region),
+		// Talos nodes may not have standard role labels. Clear nodeSelector
+		// to allow scheduling on any node, and tolerate all taints.
+		"--set", "nodeSelector=null",
+		"--set", "tolerations[0].operator=Exists",
+		"--wait", "--timeout", "5m",
+	)
+}
+
+func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials, logger logr.Logger) error {
+	// GCP CCM implementation deferred. Helm chart maturity is a risk;
+	// may need embedded manifest fallback. See plan for details.
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
+		"https://kubernetes-sigs.github.io/cloud-provider-gcp")
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+	return i.runHelm(ctx, kubeconfigPath,
+		"upgrade", "--install", "cloud-controller-manager",
+		"cloud-provider-gcp/cloud-provider-gcp",
+		"--namespace", "kube-system",
+		"--wait", "--timeout", "5m")
+}
+
+func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials, logger logr.Logger) error {
+	// Azure CCM implementation deferred. Same pattern as AWS: create
+	// azure.json Secret, pass via helm values.
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",
+		"https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/helm/repo")
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+	return i.runHelm(ctx, kubeconfigPath,
+		"upgrade", "--install", "cloud-controller-manager",
+		"cloud-provider-azure/cloud-controller-manager",
+		"--namespace", "kube-system",
+		"--wait", "--timeout", "5m")
+}
+
+// applyManifest writes a YAML manifest to a temp file and applies it via kubectl.
+func (i *Installer) applyManifest(ctx context.Context, kubeconfigPath string, manifest string, prefix string) error {
+	tmpFile, err := os.CreateTemp("", prefix+"-*.yaml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(manifest); err != nil {
+		return err
+	}
+	tmpFile.Close()
+
+	return i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name())
 }
 
 // InstallTraefik installs Traefik ingress controller
