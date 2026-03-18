@@ -938,12 +938,12 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	}
 
 	// 6. Traefik ingress - after MetalLB so it can get LoadBalancer IP.
-	// Cloud providers skip Traefik because there is no MetalLB or CCM to
-	// allocate LoadBalancer IPs on the management cluster. Traefik's LB
-	// Service stays <pending> and Helm --wait times out.
+	// Cloud providers skip Traefik. CCM provides LoadBalancer service
+	// support directly; the console gets its own cloud LB via CCM without
+	// needing an ingress controller as intermediary.
 	if !r.isAddonInstalled(cb, "traefik") {
 		if cb.IsCloudProvider() {
-			logger.Info("Skipping Traefik (cloud provider has no MetalLB/CCM for LoadBalancer)")
+			logger.Info("Skipping Traefik (cloud providers use CCM for LoadBalancer services)")
 		} else if addons.Ingress == nil || isAddonEnabled(addons.Ingress.Enabled) {
 			logger.Info("Installing Traefik")
 			version := ""
