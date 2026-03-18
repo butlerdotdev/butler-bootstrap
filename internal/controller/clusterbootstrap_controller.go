@@ -102,7 +102,7 @@ type AddonInstallerInterface interface {
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
-	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error
+	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, creds *addons.ProviderCredentials) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error
 	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error
@@ -113,7 +113,7 @@ type AddonInstallerInterface interface {
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
-	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error)
+	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error)
 }
 
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=clusterbootstraps,verbs=get;list;watch;create;update;patch;delete
@@ -1145,7 +1145,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		if !r.isAddonInstalled(cb, "butler-console") {
 			logger.Info("Installing Butler Console")
 
-			consoleURL, err := r.AddonInstaller.InstallConsole(ctx, kubeconfig, addons.Console, cb.Spec.Cluster.Name)
+			consoleURL, err := r.AddonInstaller.InstallConsole(ctx, kubeconfig, addons.Console, cb.Spec.Cluster.Name, cb.Spec.Provider)
 			if err != nil {
 				logger.Error(err, "Failed to install Butler Console")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil

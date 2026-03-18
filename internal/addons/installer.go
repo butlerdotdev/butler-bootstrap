@@ -634,7 +634,7 @@ spec:
 
 // InstallCloudControllerManager installs the cloud-specific CCM via Helm.
 // CCM is required for LoadBalancer services to get external IPs on cloud providers.
-func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error {
+func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -1974,7 +1974,7 @@ spec:
 
 // InstallConsole installs butler-console (server + frontend) on the management cluster
 // Returns the console URL for user output
-func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error) {
+func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error) {
 	logger := log.FromContext(ctx)
 
 	version := "0.4.1"
@@ -2077,10 +2077,10 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 	logger.Info("butler-console installed successfully")
 
 	// Determine URL
-	return i.getConsoleURLFromSpec(ctx, kubeconfigPath, spec, clusterName), nil
+	return i.getConsoleURLFromSpec(ctx, kubeconfigPath, spec, clusterName, provider), nil
 }
 
-func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath string, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) string {
+func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath string, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) string {
 	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {
 		host := spec.Ingress.Host
 		if host == "" {
