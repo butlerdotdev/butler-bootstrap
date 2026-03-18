@@ -25,7 +25,6 @@ import (
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
 	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
-	"github.com/go-logr/logr"
 
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -653,18 +652,19 @@ func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfi
 
 	switch provider {
 	case "aws":
-		return i.installAWSCCM(ctx, kubeconfigPath, creds, logger)
+		return i.installAWSCCM(ctx, kubeconfigPath, creds)
 	case "gcp":
-		return i.installGCPCCM(ctx, kubeconfigPath, creds, logger)
+		return i.installGCPCCM(ctx, kubeconfigPath)
 	case "azure":
-		return i.installAzureCCM(ctx, kubeconfigPath, creds, logger)
+		return i.installAzureCCM(ctx, kubeconfigPath)
 	default:
 		logger.Info("No CCM needed for provider", "provider", provider)
 		return nil
 	}
 }
 
-func (i *Installer) installAWSCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials, logger logr.Logger) error {
+func (i *Installer) installAWSCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
 	if creds == nil || creds.AWS == nil {
 		return fmt.Errorf("AWS credentials required for CCM installation")
 	}
@@ -710,7 +710,7 @@ stringData:
 	)
 }
 
-func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials, logger logr.Logger) error {
+func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string) error {
 	// GCP CCM implementation deferred. Helm chart maturity is a risk;
 	// may need embedded manifest fallback. See plan for details.
 	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
@@ -723,7 +723,7 @@ func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, cr
 		"--wait", "--timeout", "5m")
 }
 
-func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials, logger logr.Logger) error {
+func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string) error {
 	// Azure CCM implementation deferred. Same pattern as AWS: create
 	// azure.json Secret, pass via helm values.
 	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",

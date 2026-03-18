@@ -835,14 +835,39 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 2.5 Cloud Controller Manager - skipped for management cluster bootstrap.
-	// Management clusters don't need CCM. Setting --cloud-provider=external
-	// on kubelet adds an "uninitialized" taint that blocks all pod scheduling
-	// until CCM runs, creating a deadlock. Tenant clusters on cloud providers
-	// get CCM installed by butler-controller via CAPI machine templates.
+	// 2.5 Cloud Controller Manager -- provides LoadBalancer service support.
+	//
+	// Management clusters do NOT set --cloud-provider=external on kubelet.
+	// That flag adds a node.cloudprovider.kubernetes.io/uninitialized taint
+	// that blocks all pod scheduling until CCM removes it. Since CCM is
+	// itself a pod, this creates a scheduling deadlock.
+	//
+	// Without the flag, CCM runs in service-controller-only mode: it handles
+	// type:LoadBalancer Services (provisioning cloud LBs, managing security
+	// group rules) but skips node lifecycle (providerID, zone labels). Node
+	// lifecycle is unnecessary on management clusters where Talos manages
+	// nodes directly.
+	//
+	// Tenant clusters get --cloud-provider=external via CAPI machine
+	// templates, where CCM runs as a ManagementAddon with tolerations.
 	if cb.IsCloudProvider() {
-		r.ensureAddonsMap(cb)
-		cb.Status.AddonsInstalled["cloud-controller-manager"] = true
+		if !r.isAddonInstalled(cb, "cloud-controller-manager") {
+			logger.Info("Installing Cloud Controller Manager")
+			creds, err := r.getProviderCredentials(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to get provider credentials for CCM")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			if err := r.AddonInstaller.InstallCloudControllerManager(ctx, kubeconfig, cb.Spec.Provider, creds); err != nil {
+				logger.Error(err, "Failed to install Cloud Controller Manager")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			r.setAddonInstalled(cb, "cloud-controller-manager")
+			logger.Info("Cloud Controller Manager installed successfully")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Error(err, "Failed to update status after CCM install")
+			}
+		}
 	}
 
 	// 3. cert-manager - needed by Traefik and Steward webhooks
