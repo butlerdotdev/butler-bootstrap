@@ -703,6 +703,15 @@ stringData:
 		"--set", "env[1].valueFrom.secretKeyRef.name=aws-cloud-credentials",
 		"--set", "env[1].valueFrom.secretKeyRef.key=secret-access-key",
 		"--set", fmt.Sprintf("env[2].name=AWS_DEFAULT_REGION,env[2].value=%s", creds.AWS.Region),
+		// Override default args to disable cloud route management. The route
+		// controller requires a cluster CIDR (--cluster-cidr) and crashes without
+		// one. Management clusters use Cilium for pod networking, not cloud routes.
+		// All other controllers (service, cloud-node, cloud-node-lifecycle) run
+		// normally. cloud-node-controller is required to set spec.providerID on
+		// nodes, which the service controller needs for NLB target registration.
+		"--set", "args[0]=--v=2",
+		"--set", "args[1]=--cloud-provider=aws",
+		"--set", "args[2]=--configure-cloud-routes=false",
 		// Talos nodes may not have standard role labels. Clear nodeSelector
 		// to allow scheduling on any node, and tolerate all taints.
 		"--set", "nodeSelector=null",
@@ -751,6 +760,68 @@ func (i *Installer) applyManifest(ctx context.Context, kubeconfigPath string, ma
 	tmpFile.Close()
 
 	return i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name())
+}
+
+// SetNodeProviderIDs patches spec.providerID on management cluster nodes.
+// nodeProviderIDs maps private IP addresses to provider-format providerID strings
+// (e.g., "10.0.1.36" -> "aws:///us-east-1a/i-abc123"). The method lists nodes,
+// matches by InternalIP, and patches each node via kubectl.
+func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) error {
+	logger := log.FromContext(ctx)
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if len(nodeProviderIDs) == 0 {
+		return nil
+	}
+
+	// Get all nodes with their InternalIPs via kubectl
+	args := []string{
+		"--kubeconfig", kubeconfigPath,
+		"--insecure-skip-tls-verify",
+		"get", "nodes",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\t"}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{end}{"\n"}{end}`,
+	}
+	if i.NodeIP != "" {
+		args = append(args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
+	}
+	cmd := exec.CommandContext(ctx, i.KubectlPath, args...)
+	rawOutput, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+	output := string(rawOutput)
+
+	// Parse node name -> internal IP
+	patched := 0
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		nodeName := parts[0]
+		nodeIP := parts[1]
+
+		providerID, ok := nodeProviderIDs[nodeIP]
+		if !ok {
+			logger.Info("No providerID mapping for node", "node", nodeName, "ip", nodeIP)
+			continue
+		}
+
+		logger.Info("Setting providerID on node", "node", nodeName, "providerID", providerID)
+		patchJSON := fmt.Sprintf(`{"spec":{"providerID":"%s"}}`, providerID)
+		if err := i.runKubectl(ctx, kubeconfigPath, "patch", "node", nodeName,
+			"--type", "merge", "-p", patchJSON); err != nil {
+			return fmt.Errorf("failed to patch node %s providerID: %w", nodeName, err)
+		}
+		patched++
+	}
+
+	logger.Info("Node providerIDs patched", "patched", patched, "total", len(nodeProviderIDs))
+	return nil
 }
 
 // InstallTraefik installs Traefik ingress controller

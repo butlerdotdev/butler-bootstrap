@@ -114,6 +114,7 @@ type AddonInstallerInterface interface {
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
 	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error)
+	SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) error
 }
 
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=clusterbootstraps,verbs=get;list;watch;create;update;patch;delete
@@ -447,6 +448,56 @@ func (r *ClusterBootstrapReconciler) buildMachineLabels(cb *butlerv1alpha1.Clust
 		labels[fmt.Sprintf("kubernetes.io/cluster/%s", cb.Spec.Cluster.Name)] = "owned"
 	}
 	return labels
+}
+
+// buildNodeProviderIDMap reads MachineRequests to build a mapping of private IP
+// to cloud providerID (e.g., "aws:///us-east-1a/i-abc123"). This mapping is used
+// to set spec.providerID on management cluster nodes so CCM can register NLB targets.
+func (r *ClusterBootstrapReconciler) buildNodeProviderIDMap(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (map[string]string, error) {
+	machineRequests := &butlerv1alpha1.MachineRequestList{}
+	if err := r.List(ctx, machineRequests, client.InNamespace(cb.Namespace), client.MatchingLabels{
+		"butler.butlerlabs.dev/cluster-bootstrap": cb.Name,
+	}); err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]string)
+	for _, mr := range machineRequests.Items {
+		instanceID := mr.Status.ProviderID
+		if instanceID == "" {
+			continue
+		}
+
+		// The first entry in IPAddresses is the private IP (set by the provider).
+		// We use this to match against node InternalIPs on the management cluster.
+		if len(mr.Status.IPAddresses) == 0 {
+			continue
+		}
+		privateIP := mr.Status.IPAddresses[0]
+
+		// Read AZ from provider annotation (set by butler-provider-aws)
+		az := mr.Annotations["butler.butlerlabs.dev/availability-zone"]
+
+		// Build provider-specific providerID format
+		switch cb.Spec.Provider {
+		case "aws":
+			// AWS providerID format: aws:///<az>/<instance-id>
+			if az != "" {
+				result[privateIP] = fmt.Sprintf("aws:///%s/%s", az, instanceID)
+			} else {
+				result[privateIP] = fmt.Sprintf("aws:///%s", instanceID)
+			}
+		case "gcp":
+			if az != "" {
+				result[privateIP] = fmt.Sprintf("gce:///%s/%s", az, instanceID)
+			} else {
+				result[privateIP] = fmt.Sprintf("gce:///%s", instanceID)
+			}
+		case "azure":
+			result[privateIP] = fmt.Sprintf("azure:///%s", instanceID)
+		}
+	}
+	return result, nil
 }
 
 func (r *ClusterBootstrapReconciler) updateMachineStatuses(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
@@ -842,11 +893,10 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	// that blocks all pod scheduling until CCM removes it. Since CCM is
 	// itself a pod, this creates a scheduling deadlock.
 	//
-	// Without the flag, CCM runs in service-controller-only mode: it handles
-	// type:LoadBalancer Services (provisioning cloud LBs, managing security
-	// group rules) but skips node lifecycle (providerID, zone labels). Node
-	// lifecycle is unnecessary on management clusters where Talos manages
-	// nodes directly.
+	// Without the flag, nodes lack spec.providerID. We set providerID
+	// explicitly (step 2.6) so CCM can register NLB/LB targets by instance.
+	// The route controller is disabled (--configure-cloud-routes=false)
+	// since Cilium handles pod networking.
 	//
 	// Tenant clusters get --cloud-provider=external via CAPI machine
 	// templates, where CCM runs as a ManagementAddon with tolerations.
@@ -866,6 +916,30 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Cloud Controller Manager installed successfully")
 			if err := r.Status().Update(ctx, cb); err != nil {
 				logger.Error(err, "Failed to update status after CCM install")
+			}
+		}
+
+		// 2.6 Set spec.providerID on management cluster nodes.
+		// CCM needs providerID to register NLB targets. Since we do not set
+		// --cloud-provider=external on kubelet, nodes lack providerID by default.
+		// Build a mapping from private IP to AWS-format providerID using
+		// MachineRequest status (instance IDs + private IPs from IPAddresses).
+		if !r.isAddonInstalled(cb, "node-provider-ids") {
+			nodeProviderIDs, err := r.buildNodeProviderIDMap(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to build node providerID map")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			if len(nodeProviderIDs) > 0 {
+				if err := r.AddonInstaller.SetNodeProviderIDs(ctx, kubeconfig, string(cb.Spec.Provider), nodeProviderIDs); err != nil {
+					logger.Error(err, "Failed to set node providerIDs")
+					return ctrl.Result{RequeueAfter: requeueShort}, nil
+				}
+				logger.Info("Node providerIDs set", "count", len(nodeProviderIDs))
+			}
+			r.setAddonInstalled(cb, "node-provider-ids")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Error(err, "Failed to update status after setting providerIDs")
 			}
 		}
 	}
