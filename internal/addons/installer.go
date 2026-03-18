@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
 	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
@@ -2173,6 +2174,8 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 }
 
 func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath string, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) string {
+	logger := log.FromContext(ctx)
+
 	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {
 		host := spec.Ingress.Host
 		if host == "" {
@@ -2185,17 +2188,57 @@ func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath st
 		return fmt.Sprintf("%s://%s", scheme, host)
 	}
 
-	// Try LoadBalancer IP
-	cmd := exec.CommandContext(ctx, i.KubectlPath,
+	// Cloud LoadBalancers take time to provision. Poll for up to 5 minutes.
+	// AWS returns a hostname; GCP and Azure return an IP.
+	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
+	if isCloud {
+		logger.Info("Waiting for cloud LoadBalancer endpoint")
+		for attempt := 0; attempt < 30; attempt++ {
+			if hostname, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].hostname}"); err != nil {
+				logger.Info("Error checking LB hostname, retrying", "error", err)
+			} else if hostname != "" {
+				logger.Info("Console LoadBalancer ready", "hostname", hostname)
+				return fmt.Sprintf("http://%s", hostname)
+			}
+
+			if ip, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].ip}"); err != nil {
+				logger.Info("Error checking LB IP, retrying", "error", err)
+			} else if ip != "" {
+				logger.Info("Console LoadBalancer ready", "ip", ip)
+				return fmt.Sprintf("http://%s", ip)
+			}
+
+			logger.Info("Waiting for console LoadBalancer", "attempt", attempt+1, "of", 30)
+			time.Sleep(10 * time.Second)
+		}
+		logger.Info("Console LoadBalancer not ready after 5 minutes, falling back to port-forward instructions")
+	}
+
+	// On-prem: try MetalLB-assigned LoadBalancer IP (single attempt)
+	if ip, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].ip}"); err == nil && ip != "" {
+		return fmt.Sprintf("http://%s", ip)
+	}
+
+	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
+}
+
+// getServiceField extracts a jsonpath field from the console frontend Service.
+// Returns ("", nil) if the field is empty/unset. Returns ("", err) on kubectl failure.
+func (i *Installer) getServiceField(ctx context.Context, kubeconfigPath string, jsonpath string) (string, error) {
+	args := []string{
 		"--kubeconfig", kubeconfigPath,
 		"--insecure-skip-tls-verify",
 		"get", "svc", "butler-console-frontend",
 		"-n", "butler-system",
-		"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
-	)
-	if output, err := cmd.Output(); err == nil && len(output) > 0 {
-		return fmt.Sprintf("http://%s", string(output))
+		"-o", jsonpath,
 	}
-
-	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
+	if i.NodeIP != "" {
+		args = append(args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
+	}
+	cmd := exec.CommandContext(ctx, i.KubectlPath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
