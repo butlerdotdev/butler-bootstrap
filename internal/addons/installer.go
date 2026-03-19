@@ -647,7 +647,7 @@ func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfi
 	case "gcp":
 		return i.installGCPCCM(ctx, kubeconfigPath, clusterName, creds)
 	case "azure":
-		return i.installAzureCCM(ctx, kubeconfigPath)
+		return i.installAzureCCM(ctx, kubeconfigPath, clusterName, creds)
 	default:
 		logger.Info("No CCM needed for provider", "provider", provider)
 		return nil
@@ -819,17 +819,121 @@ spec:
 		"-n", "kube-system", "--timeout=5m")
 }
 
-func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string) error {
-	// Azure CCM implementation deferred. Same pattern as AWS: create
-	// azure.json Secret, pass via helm values.
-	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",
-		"https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/helm/repo")
-	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-	return i.runHelm(ctx, kubeconfigPath,
-		"upgrade", "--install", "cloud-controller-manager",
-		"cloud-provider-azure/cloud-controller-manager",
-		"--namespace", "kube-system",
-		"--wait", "--timeout", "5m")
+func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, clusterName string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
+	if creds == nil || creds.Azure == nil {
+		return fmt.Errorf("Azure credentials required for CCM installation")
+	}
+
+	az := creds.Azure
+
+	// azure.json cloud-config consumed by the CCM binary
+	azureJSON := fmt.Sprintf(`{
+  "cloud": "AzurePublicCloud",
+  "tenantId": "%s",
+  "subscriptionId": "%s",
+  "aadClientId": "%s",
+  "aadClientSecret": "%s",
+  "resourceGroup": "%s",
+  "location": "%s",
+  "vnetName": "%s",
+  "subnetName": "%s",
+  "loadBalancerSku": "Standard",
+  "useInstanceMetadata": true
+}`, az.TenantID, az.SubscriptionID, az.ClientID, az.ClientSecret,
+		az.ResourceGroup, az.Location, az.VNetName, az.SubnetName)
+
+	azureJSONB64 := base64.StdEncoding.EncodeToString([]byte(azureJSON))
+
+	// Deploy CCM via embedded manifests for full control over config
+	manifest := fmt.Sprintf(`---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-cloud-config
+  namespace: kube-system
+type: Opaque
+data:
+  azure.json: %s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:cloud-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+  labels:
+    component: cloud-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: cloud-controller-manager
+  template:
+    metadata:
+      labels:
+        component: cloud-controller-manager
+    spec:
+      serviceAccountName: cloud-controller-manager
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: cloud-controller-manager
+        image: mcr.microsoft.com/oss/kubernetes/azure-cloud-controller-manager:v1.31.0
+        command:
+        - /usr/local/bin/cloud-controller-manager
+        args:
+        - --cloud-provider=azure
+        - --cloud-config=/etc/kubernetes/azure.json
+        - --configure-cloud-routes=false
+        - --allocate-node-cidrs=false
+        - --controllers=*,-node-route-controller
+        - --cluster-name=%s
+        - --v=2
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "4"
+            memory: 2Gi
+        volumeMounts:
+        - name: azure-config
+          mountPath: /etc/kubernetes/azure.json
+          subPath: azure.json
+          readOnly: true
+      volumes:
+      - name: azure-config
+        secret:
+          secretName: azure-cloud-config
+`, azureJSONB64, clusterName)
+
+	if err := i.applyManifest(ctx, kubeconfigPath, manifest, "ccm-azure"); err != nil {
+		return fmt.Errorf("failed to apply Azure CCM manifests: %w", err)
+	}
+	logger.Info("Azure CCM manifests applied")
+
+	// Wait for Deployment to roll out
+	return i.runKubectl(ctx, kubeconfigPath, "rollout", "status", "deployment/cloud-controller-manager",
+		"-n", "kube-system", "--timeout=5m")
 }
 
 // applyManifest writes a YAML manifest to a temp file and applies it via kubectl.

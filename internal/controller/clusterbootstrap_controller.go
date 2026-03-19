@@ -484,7 +484,8 @@ func (r *ClusterBootstrapReconciler) buildNodeProviderIDMap(ctx context.Context,
 			// GCP provider stores full providerID: gce://<project>/<zone>/<name>
 			result[privateIP] = instanceID
 		case "azure":
-			result[privateIP] = fmt.Sprintf("azure:///%s", instanceID)
+			// ARM resource IDs start with /subscriptions/... so azure:// + /sub... = azure:///sub...
+			result[privateIP] = fmt.Sprintf("azure://%s", instanceID)
 		}
 	}
 	return result, nil
