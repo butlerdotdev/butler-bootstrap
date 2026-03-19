@@ -2297,7 +2297,7 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 	// creates the correct LB type on first observation (no orphaned CLB).
 	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
 	if isCloud {
-		patch := `{"spec":{"type":"LoadBalancer"}`
+		patch := `{"spec":{"type":"LoadBalancer"}}`
 		if provider == "aws" {
 			patch = `{"metadata":{"annotations":{"service.beta.kubernetes.io/aws-load-balancer-type":"nlb"}},"spec":{"type":"LoadBalancer"}}`
 		}
