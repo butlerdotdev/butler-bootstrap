@@ -634,7 +634,7 @@ spec:
 }
 
 // InstallCloudControllerManager installs the cloud-specific CCM via Helm.
-func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, creds *ProviderCredentials) error {
+func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, clusterName string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -649,7 +649,7 @@ func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfi
 	case "aws":
 		return i.installAWSCCM(ctx, kubeconfigPath, creds)
 	case "gcp":
-		return i.installGCPCCM(ctx, kubeconfigPath, creds)
+		return i.installGCPCCM(ctx, kubeconfigPath, clusterName, creds)
 	case "azure":
 		return i.installAzureCCM(ctx, kubeconfigPath)
 	default:
@@ -705,7 +705,7 @@ stringData:
 	)
 }
 
-func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials) error {
+func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, clusterName string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	if creds == nil || creds.GCP == nil {
 		return fmt.Errorf("GCP credentials required for CCM installation")
@@ -732,6 +732,7 @@ data:
     project-id = %s
     network-name = %s
     regional = true
+    node-tags = %s
 ---
 apiVersion: v1
 kind: Secret
@@ -789,6 +790,8 @@ spec:
         - --cloud-provider=gce
         - --cloud-config=/etc/kubernetes/cloud-config
         - --configure-cloud-routes=false
+        - --allocate-node-cidrs=false
+        - --controllers=*,-nodeipam
         - --v=2
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -808,7 +811,7 @@ spec:
       - name: gcp-creds
         secret:
           secretName: gcp-cloud-credentials
-`, creds.GCP.ProjectID, network, saKeyB64)
+`, creds.GCP.ProjectID, network, clusterName, saKeyB64)
 
 	if err := i.applyManifest(ctx, kubeconfigPath, manifest, "ccm-gcp"); err != nil {
 		return fmt.Errorf("failed to apply GCP CCM manifests: %w", err)

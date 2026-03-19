@@ -102,7 +102,7 @@ type AddonInstallerInterface interface {
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
-	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, creds *addons.ProviderCredentials) error
+	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, clusterName string, creds *addons.ProviderCredentials) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error
 	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error
@@ -886,7 +886,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				logger.Error(err, "Failed to get provider credentials for CCM")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
-			if err := r.AddonInstaller.InstallCloudControllerManager(ctx, kubeconfig, cb.Spec.Provider, creds); err != nil {
+			if err := r.AddonInstaller.InstallCloudControllerManager(ctx, kubeconfig, cb.Spec.Provider, cb.Spec.Cluster.Name, creds); err != nil {
 				logger.Error(err, "Failed to install Cloud Controller Manager")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
