@@ -711,72 +711,113 @@ func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, cr
 		return fmt.Errorf("GCP credentials required for CCM installation")
 	}
 
-	// Create cloud-config ConfigMap
 	network := creds.GCP.Network
 	if network == "" {
 		network = "default"
 	}
-	cloudConfig := fmt.Sprintf(`[global]
-project-id = %s
-network-name = %s
-regional = true
-`, creds.GCP.ProjectID, network)
 
-	configMapManifest := fmt.Sprintf(`apiVersion: v1
+	// Encode SA key as base64 for Secret
+	saKeyB64 := base64.StdEncoding.EncodeToString([]byte(creds.GCP.ServiceAccountKey))
+
+	// Deploy CCM via embedded manifests (no upstream Helm chart exists)
+	manifest := fmt.Sprintf(`---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gcp-cloud-config
   namespace: kube-system
 data:
   cloud-config: |
-%s`, indentString(cloudConfig, "    "))
-
-	if err := i.applyManifest(ctx, kubeconfigPath, configMapManifest, "ccm-gcp-config"); err != nil {
-		return fmt.Errorf("failed to create GCP cloud-config ConfigMap: %w", err)
-	}
-
-	// Create service account key Secret
-	secretManifest := fmt.Sprintf(`apiVersion: v1
+    [global]
+    project-id = %s
+    network-name = %s
+    regional = true
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: gcp-cloud-credentials
   namespace: kube-system
 type: Opaque
-stringData:
-  key.json: '%s'
-`, strings.ReplaceAll(creds.GCP.ServiceAccountKey, "'", "''"))
+data:
+  key.json: %s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:cloud-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+  labels:
+    component: cloud-controller-manager
+spec:
+  selector:
+    matchLabels:
+      component: cloud-controller-manager
+  template:
+    metadata:
+      labels:
+        component: cloud-controller-manager
+    spec:
+      serviceAccountName: cloud-controller-manager
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: cloud-controller-manager
+        image: registry.k8s.io/cloud-provider-gcp/cloud-controller-manager:v30.0.0
+        command:
+        - /cloud-controller-manager
+        args:
+        - --cloud-provider=gce
+        - --cloud-config=/etc/kubernetes/cloud-config
+        - --configure-cloud-routes=false
+        - --v=2
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /etc/kubernetes/gcp/key.json
+        volumeMounts:
+        - name: cloud-config
+          mountPath: /etc/kubernetes/cloud-config
+          subPath: cloud-config
+          readOnly: true
+        - name: gcp-creds
+          mountPath: /etc/kubernetes/gcp
+          readOnly: true
+      volumes:
+      - name: cloud-config
+        configMap:
+          name: gcp-cloud-config
+      - name: gcp-creds
+        secret:
+          secretName: gcp-cloud-credentials
+`, creds.GCP.ProjectID, network, saKeyB64)
 
-	if err := i.applyManifest(ctx, kubeconfigPath, secretManifest, "ccm-gcp-secret"); err != nil {
-		return fmt.Errorf("failed to create GCP CCM credentials Secret: %w", err)
+	if err := i.applyManifest(ctx, kubeconfigPath, manifest, "ccm-gcp"); err != nil {
+		return fmt.Errorf("failed to apply GCP CCM manifests: %w", err)
 	}
-	logger.Info("Created GCP CCM credentials")
+	logger.Info("GCP CCM manifests applied")
 
-	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
-		"https://kubernetes-sigs.github.io/cloud-provider-gcp")
-	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-
-	return i.runHelm(ctx, kubeconfigPath,
-		"upgrade", "--install", "cloud-controller-manager",
-		"cloud-provider-gcp/cloud-provider-gcp",
-		"--namespace", "kube-system",
-		"--set", "cloudConfigPath=/etc/kubernetes/cloud-config",
-		"--set", "extraVolumes[0].name=cloud-config",
-		"--set", "extraVolumes[0].configMap.name=gcp-cloud-config",
-		"--set", "extraVolumeMounts[0].name=cloud-config",
-		"--set", "extraVolumeMounts[0].mountPath=/etc/kubernetes/cloud-config",
-		"--set", "extraVolumeMounts[0].subPath=cloud-config",
-		"--set", "extraVolumeMounts[0].readOnly=true",
-		"--set", "extraVolumes[1].name=gcp-creds",
-		"--set", "extraVolumes[1].secret.secretName=gcp-cloud-credentials",
-		"--set", "extraVolumeMounts[1].name=gcp-creds",
-		"--set", "extraVolumeMounts[1].mountPath=/etc/kubernetes/gcp",
-		"--set", "extraVolumeMounts[1].readOnly=true",
-		"--set", "extraEnvVars[0].name=GOOGLE_APPLICATION_CREDENTIALS",
-		"--set", "extraEnvVars[0].value=/etc/kubernetes/gcp/key.json",
-		"--set", "nodeSelector=null",
-		"--set", "tolerations[0].operator=Exists",
-		"--wait", "--timeout", "5m",
-	)
+	// Wait for DaemonSet to roll out
+	return i.runKubectl(ctx, kubeconfigPath, "rollout", "status", "daemonset/cloud-controller-manager",
+		"-n", "kube-system", "--timeout=5m")
 }
 
 func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string) error {
@@ -790,17 +831,6 @@ func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string) 
 		"cloud-provider-azure/cloud-controller-manager",
 		"--namespace", "kube-system",
 		"--wait", "--timeout", "5m")
-}
-
-// indentString indents each line of s with the given prefix.
-func indentString(s, prefix string) string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		if line != "" {
-			lines[i] = prefix + line
-		}
-	}
-	return strings.Join(lines, "\n")
 }
 
 // applyManifest writes a YAML manifest to a temp file and applies it via kubectl.
