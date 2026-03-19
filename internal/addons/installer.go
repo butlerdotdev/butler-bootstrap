@@ -84,8 +84,7 @@ type ProxmoxCredentials struct {
 	Password string
 }
 
-// GCPCredentials contains GCP service account and infrastructure config
-// extracted from a ProviderConfig for use during bootstrap.
+// GCPCredentials contains GCP service account and infrastructure config.
 type GCPCredentials struct {
 	ServiceAccountKey string // JSON service account key
 	ProjectID         string
@@ -98,8 +97,7 @@ type GCPCredentials struct {
 	ImageFamily       string
 }
 
-// AWSCredentials contains IAM credentials and VPC config
-// extracted from a ProviderConfig for use during bootstrap.
+// AWSCredentials contains IAM credentials and VPC config.
 type AWSCredentials struct {
 	AccessKeyID     string
 	SecretAccessKey  string
@@ -109,8 +107,7 @@ type AWSCredentials struct {
 	SecurityGroupID  string
 }
 
-// AzureCredentials contains service principal credentials and resource group config
-// extracted from a ProviderConfig for use during bootstrap.
+// AzureCredentials contains Azure service principal and resource group config.
 type AzureCredentials struct {
 	ClientID       string
 	ClientSecret   string
@@ -149,8 +146,7 @@ func (i *Installer) writeKubeconfig(kubeconfig []byte) (string, func(), error) {
 	return f.Name(), func() { os.Remove(f.Name()) }, nil
 }
 
-// makeKubeconfigInsecure modifies a kubeconfig to skip TLS verification
-// This is needed because clusterctl doesn't properly handle self-signed CAs
+// makeKubeconfigInsecure modifies a kubeconfig to skip TLS verification.
 func makeKubeconfigInsecure(kubeconfig []byte) ([]byte, error) {
 	config, err := clientcmd.Load(kubeconfig)
 	if err != nil {
@@ -1095,8 +1091,7 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 	return nil
 }
 
-// InstallButlerCRDs installs Butler platform CRDs via Helm chart and overlays
-// embedded CRDs to ensure cloud provider fields are present.
+// InstallButlerCRDs installs Butler platform CRDs via Helm chart, overlaying embedded CRDs.
 func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Installing Butler platform CRDs", "version", version)
@@ -1218,9 +1213,7 @@ func (i *Installer) waitForButlerCRDs(ctx context.Context, kubeconfigPath string
 	return nil
 }
 
-// applyEmbeddedCRDs applies the embedded CRD YAML files to the target cluster.
-// This overlays any fields that are present in the build but not yet released
-// in the butler-crds Helm chart (e.g., cloud provider fields on ProviderConfig).
+// applyEmbeddedCRDs applies embedded CRDs, overlaying fields ahead of chart releases.
 func (i *Installer) applyEmbeddedCRDs(ctx context.Context, kubeconfigPath string) error {
 	logger := log.FromContext(ctx)
 
@@ -1263,8 +1256,7 @@ func (i *Installer) applyEmbeddedCRDs(ctx context.Context, kubeconfigPath string
 	return nil
 }
 
-// InstallInitialProviderConfig creates the initial ProviderConfig CR and credentials secret
-// on the management cluster based on the provider used during bootstrap.
+// InstallInitialProviderConfig creates the initial ProviderConfig CR and credentials secret.
 func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Creating initial ProviderConfig", "provider", providerType)
@@ -1531,8 +1523,7 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
-// generateGCPProviderConfig returns the Secret and ProviderConfig manifests
-// for a GCP provider on the target management cluster.
+// generateGCPProviderConfig returns Secret and ProviderConfig manifests for GCP.
 func (i *Installer) generateGCPProviderConfig(creds *GCPCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -1590,8 +1581,7 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
-// generateAWSProviderConfig returns the Secret and ProviderConfig manifests
-// for an AWS provider on the target management cluster.
+// generateAWSProviderConfig returns Secret and ProviderConfig manifests for AWS.
 func (i *Installer) generateAWSProviderConfig(creds *AWSCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -1638,8 +1628,7 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
-// generateAzureProviderConfig returns the Secret and ProviderConfig manifests
-// for an Azure provider on the target management cluster.
+// generateAzureProviderConfig returns Secret and ProviderConfig manifests for Azure.
 func (i *Installer) generateAzureProviderConfig(creds *AzureCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret

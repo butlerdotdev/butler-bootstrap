@@ -914,7 +914,6 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 					return ctrl.Result{RequeueAfter: requeueShort}, nil
 				}
 			}
-			// Only mark complete when all expected nodes have been patched.
 			expectedNodes := int(cb.GetControlPlaneReplicas()) + int(cb.Spec.Cluster.Workers.Replicas)
 			if patchedCount >= expectedNodes {
 				r.setAddonInstalled(cb, "node-provider-ids")
@@ -958,8 +957,6 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Installing Longhorn")
 			version := addons.Storage.Version
 
-			// Use GetStorageReplicaCount() for topology-aware replica count
-			// Returns 1 for single-node, 3 for HA (default)
 			replicas := cb.GetStorageReplicaCount()
 
 			logger.Info("Installing Longhorn with replica count",
