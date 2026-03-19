@@ -93,6 +93,13 @@ spec:
                   Azure contains Azure-specific configuration.
                   Required when provider is "azure".
                 properties:
+                  imageURN:
+                    description: |-
+                      ImageURN is the VM image reference. Supports three formats:
+                      - URN: "publisher:offer:sku:version" (e.g., "Canonical:UbuntuServer:18.04-LTS:latest")
+                      - Managed image resource ID: "/subscriptions/.../images/my-image"
+                      - Shared gallery image ID: "/subscriptions/.../galleries/.../images/.../versions/..."
+                    type: string
                   location:
                     description: Location is the Azure region.
                     type: string
@@ -104,6 +111,9 @@ spec:
                     type: string
                   subscriptionID:
                     description: SubscriptionID is the Azure subscription ID.
+                    type: string
+                  vmSize:
+                    description: VMSize is the default Azure VM size (e.g., "Standard_D4s_v3").
                     type: string
                   vnetName:
                     description: VNetName is the Azure Virtual Network name.
