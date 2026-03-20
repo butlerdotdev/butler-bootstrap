@@ -915,7 +915,10 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 					return ctrl.Result{RequeueAfter: requeueShort}, nil
 				}
 			}
-			expectedNodes := int(cb.GetControlPlaneReplicas()) + int(cb.Spec.Cluster.Workers.Replicas)
+			expectedNodes := int(cb.GetControlPlaneReplicas())
+			if cb.Spec.Cluster.Workers != nil {
+				expectedNodes += int(cb.Spec.Cluster.Workers.Replicas)
+			}
 			if patchedCount >= expectedNodes {
 				r.setAddonInstalled(cb, "node-provider-ids")
 				logger.Info("All node providerIDs set", "count", len(nodeProviderIDs))
