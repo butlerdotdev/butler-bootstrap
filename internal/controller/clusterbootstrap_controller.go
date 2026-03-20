@@ -1512,14 +1512,15 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 		logger.Info("Retrieved AWS credentials", "region", creds.AWS.Region)
 	case "azure":
 		creds.Azure = &addons.AzureCredentials{
-			ClientID:       string(secret.Data["clientID"]),
-			ClientSecret:   string(secret.Data["clientSecret"]),
-			TenantID:       string(secret.Data["tenantID"]),
-			SubscriptionID: string(secret.Data["subscriptionID"]),
-			ResourceGroup:  providerConfig.Spec.Azure.ResourceGroup,
-			Location:       providerConfig.Spec.Azure.Location,
-			VNetName:       providerConfig.Spec.Azure.VNetName,
-			SubnetName:     providerConfig.Spec.Azure.SubnetName,
+			ClientID:          string(secret.Data["clientID"]),
+			ClientSecret:      string(secret.Data["clientSecret"]),
+			TenantID:          string(secret.Data["tenantID"]),
+			SubscriptionID:    string(secret.Data["subscriptionID"]),
+			ResourceGroup:     providerConfig.Spec.Azure.ResourceGroup,
+			Location:          providerConfig.Spec.Azure.Location,
+			VNetName:          providerConfig.Spec.Azure.VNetName,
+			SubnetName:        providerConfig.Spec.Azure.SubnetName,
+			SecurityGroupName: string(secret.Data["securityGroupName"]),
 		}
 		logger.Info("Retrieved Azure credentials", "subscriptionID", creds.Azure.SubscriptionID, "resourceGroup", creds.Azure.ResourceGroup)
 	}
@@ -1639,14 +1640,15 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 			return nil, fmt.Errorf("ProviderConfig %s has no azure configuration", providerConfigKey)
 		}
 		creds.Azure = &addons.AzureCredentials{
-			ClientID:       string(secret.Data["clientID"]),
-			ClientSecret:   string(secret.Data["clientSecret"]),
-			TenantID:       string(secret.Data["tenantID"]),
-			SubscriptionID: string(secret.Data["subscriptionID"]),
-			ResourceGroup:  providerConfig.Spec.Azure.ResourceGroup,
-			Location:       providerConfig.Spec.Azure.Location,
-			VNetName:       providerConfig.Spec.Azure.VNetName,
-			SubnetName:     providerConfig.Spec.Azure.SubnetName,
+			ClientID:          string(secret.Data["clientID"]),
+			ClientSecret:      string(secret.Data["clientSecret"]),
+			TenantID:          string(secret.Data["tenantID"]),
+			SubscriptionID:    string(secret.Data["subscriptionID"]),
+			ResourceGroup:     providerConfig.Spec.Azure.ResourceGroup,
+			Location:          providerConfig.Spec.Azure.Location,
+			VNetName:          providerConfig.Spec.Azure.VNetName,
+			SubnetName:        providerConfig.Spec.Azure.SubnetName,
+			SecurityGroupName: string(secret.Data["securityGroupName"]),
 		}
 		logger.Info("Extracted Azure credentials",
 			"subscriptionID", creds.Azure.SubscriptionID,

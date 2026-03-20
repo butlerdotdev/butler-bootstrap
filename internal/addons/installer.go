@@ -109,14 +109,15 @@ type AWSCredentials struct {
 
 // AzureCredentials contains Azure service principal and resource group config.
 type AzureCredentials struct {
-	ClientID       string
-	ClientSecret   string
-	TenantID       string
-	SubscriptionID string
-	ResourceGroup  string
-	Location       string
-	VNetName       string
-	SubnetName     string
+	ClientID          string
+	ClientSecret      string
+	TenantID          string
+	SubscriptionID    string
+	ResourceGroup     string
+	Location          string
+	VNetName          string
+	SubnetName        string
+	SecurityGroupName string
 }
 
 // NewInstaller creates a new addon installer
@@ -827,7 +828,8 @@ func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, 
 
 	az := creds.Azure
 
-	// azure.json cloud-config consumed by the CCM binary
+	// azure.json cloud-config consumed by the CCM binary.
+	// securityGroupName is required for CCM to manage NSG rules for LoadBalancer services.
 	azureJSON := fmt.Sprintf(`{
   "cloud": "AzurePublicCloud",
   "tenantId": "%s",
@@ -838,10 +840,11 @@ func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, 
   "location": "%s",
   "vnetName": "%s",
   "subnetName": "%s",
+  "securityGroupName": "%s",
   "loadBalancerSku": "Standard",
   "useInstanceMetadata": true
 }`, az.TenantID, az.SubscriptionID, az.ClientID, az.ClientSecret,
-		az.ResourceGroup, az.Location, az.VNetName, az.SubnetName)
+		az.ResourceGroup, az.Location, az.VNetName, az.SubnetName, az.SecurityGroupName)
 
 	azureJSONB64 := base64.StdEncoding.EncodeToString([]byte(azureJSON))
 
@@ -1734,6 +1737,15 @@ spec:
 
 // generateAzureProviderConfig returns Secret and ProviderConfig manifests for Azure.
 func (i *Installer) generateAzureProviderConfig(creds *AzureCredentials) (string, string) {
+	secretData := fmt.Sprintf(`  clientID: "%s"
+  clientSecret: "%s"
+  tenantID: "%s"
+  subscriptionID: "%s"`, creds.ClientID, creds.ClientSecret, creds.TenantID, creds.SubscriptionID)
+	if creds.SecurityGroupName != "" {
+		secretData += fmt.Sprintf(`
+  securityGroupName: "%s"`, creds.SecurityGroupName)
+	}
+
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
 metadata:
@@ -1741,11 +1753,8 @@ metadata:
   namespace: butler-system
 type: Opaque
 stringData:
-  clientID: "%s"
-  clientSecret: "%s"
-  tenantID: "%s"
-  subscriptionID: "%s"
-`, creds.ClientID, creds.ClientSecret, creds.TenantID, creds.SubscriptionID)
+%s
+`, secretData)
 
 	azureConfig := fmt.Sprintf(`    subscriptionID: "%s"
     resourceGroup: "%s"`, creds.SubscriptionID, creds.ResourceGroup)
