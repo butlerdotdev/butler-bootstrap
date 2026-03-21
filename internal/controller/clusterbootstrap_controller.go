@@ -114,6 +114,7 @@ type AddonInstallerInterface interface {
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
 	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error)
+	EnsureCloudLBBackendPool(ctx context.Context, kubeconfig []byte, provider string, creds *addons.ProviderCredentials, clusterName string) error
 	SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) (int, error)
 }
 
@@ -1244,6 +1245,28 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Butler Console installed successfully", "url", consoleURL)
 			if err := r.Status().Update(ctx, cb); err != nil {
 				logger.Error(err, "Failed to update status after Console install")
+			}
+		}
+	}
+
+	// 12.5 Ensure cloud LB backend pool is populated.
+	// Azure CCM v1.31 with vmType=standard does not auto-populate the backend
+	// pool, leaving the LB unreachable. Add node NICs to the pool directly.
+	if cb.IsCloudProvider() && string(cb.Spec.Provider) == "azure" {
+		if !r.isAddonInstalled(cb, "cloud-lb-backend-pool") {
+			creds, err := r.getProviderCredentials(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to get credentials for LB backend pool")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			if err := r.AddonInstaller.EnsureCloudLBBackendPool(ctx, kubeconfig, string(cb.Spec.Provider), creds, cb.Spec.Cluster.Name); err != nil {
+				logger.Error(err, "Failed to ensure cloud LB backend pool")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			r.setAddonInstalled(cb, "cloud-lb-backend-pool")
+			logger.Info("Cloud LB backend pool populated")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Error(err, "Failed to update status after LB backend pool")
 			}
 		}
 	}
