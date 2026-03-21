@@ -830,6 +830,8 @@ func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, 
 
 	// azure.json cloud-config consumed by the CCM binary.
 	// securityGroupName is required for CCM to manage NSG rules for LoadBalancer services.
+	// primaryAvailabilitySetName tells CCM which AvailabilitySet contains nodes for
+	// LB backend pool membership (VMs outside an AvailabilitySet are not added).
 	azureJSON := fmt.Sprintf(`{
   "cloud": "AzurePublicCloud",
   "tenantId": "%s",
@@ -841,10 +843,13 @@ func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, 
   "vnetName": "%s",
   "subnetName": "%s",
   "securityGroupName": "%s",
+  "primaryAvailabilitySetName": "%s-avset",
+  "vmType": "standard",
   "loadBalancerSku": "Standard",
   "useInstanceMetadata": true
 }`, az.TenantID, az.SubscriptionID, az.ClientID, az.ClientSecret,
-		az.ResourceGroup, az.Location, az.VNetName, az.SubnetName, az.SecurityGroupName)
+		az.ResourceGroup, az.Location, az.VNetName, az.SubnetName, az.SecurityGroupName,
+		clusterName)
 
 	azureJSONB64 := base64.StdEncoding.EncodeToString([]byte(azureJSON))
 
