@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
 	"github.com/butlerdotdev/butler-bootstrap/internal/crds"
@@ -83,8 +84,7 @@ type ProxmoxCredentials struct {
 	Password string
 }
 
-// GCPCredentials contains GCP service account and infrastructure config
-// extracted from a ProviderConfig for use during bootstrap.
+// GCPCredentials contains GCP service account and infrastructure config.
 type GCPCredentials struct {
 	ServiceAccountKey string // JSON service account key
 	ProjectID         string
@@ -97,8 +97,7 @@ type GCPCredentials struct {
 	ImageFamily       string
 }
 
-// AWSCredentials contains IAM credentials and VPC config
-// extracted from a ProviderConfig for use during bootstrap.
+// AWSCredentials contains IAM credentials and VPC config.
 type AWSCredentials struct {
 	AccessKeyID     string
 	SecretAccessKey  string
@@ -108,17 +107,17 @@ type AWSCredentials struct {
 	SecurityGroupID  string
 }
 
-// AzureCredentials contains service principal credentials and resource group config
-// extracted from a ProviderConfig for use during bootstrap.
+// AzureCredentials contains Azure service principal and resource group config.
 type AzureCredentials struct {
-	ClientID       string
-	ClientSecret   string
-	TenantID       string
-	SubscriptionID string
-	ResourceGroup  string
-	Location       string
-	VNetName       string
-	SubnetName     string
+	ClientID          string
+	ClientSecret      string
+	TenantID          string
+	SubscriptionID    string
+	ResourceGroup     string
+	Location          string
+	VNetName          string
+	SubnetName        string
+	SecurityGroupName string
 }
 
 // NewInstaller creates a new addon installer
@@ -148,8 +147,7 @@ func (i *Installer) writeKubeconfig(kubeconfig []byte) (string, func(), error) {
 	return f.Name(), func() { os.Remove(f.Name()) }, nil
 }
 
-// makeKubeconfigInsecure modifies a kubeconfig to skip TLS verification
-// This is needed because clusterctl doesn't properly handle self-signed CAs
+// makeKubeconfigInsecure modifies a kubeconfig to skip TLS verification.
 func makeKubeconfigInsecure(kubeconfig []byte) ([]byte, error) {
 	config, err := clientcmd.Load(kubeconfig)
 	if err != nil {
@@ -633,8 +631,7 @@ spec:
 }
 
 // InstallCloudControllerManager installs the cloud-specific CCM via Helm.
-// CCM is required for LoadBalancer services to get external IPs on cloud providers.
-func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error {
+func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, clusterName string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -646,37 +643,379 @@ func (i *Installer) InstallCloudControllerManager(ctx context.Context, kubeconfi
 	i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "kube-system")
 
 	switch provider {
-	case "gcp":
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-gcp",
-			"https://kubernetes-sigs.github.io/cloud-provider-gcp")
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-		return i.runHelm(ctx, kubeconfigPath,
-			"upgrade", "--install", "cloud-controller-manager",
-			"cloud-provider-gcp/cloud-provider-gcp",
-			"--namespace", "kube-system",
-			"--wait", "--timeout", "5m")
 	case "aws":
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "aws-cloud-controller-manager",
-			"https://kubernetes.github.io/cloud-provider-aws")
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-		return i.runHelm(ctx, kubeconfigPath,
-			"upgrade", "--install", "aws-cloud-controller-manager",
-			"aws-cloud-controller-manager/aws-cloud-controller-manager",
-			"--namespace", "kube-system",
-			"--wait", "--timeout", "5m")
+		return i.installAWSCCM(ctx, kubeconfigPath, creds)
+	case "gcp":
+		return i.installGCPCCM(ctx, kubeconfigPath, clusterName, creds)
 	case "azure":
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "cloud-provider-azure",
-			"https://raw.githubusercontent.com/kubernetes-sigs/cloud-provider-azure/master/helm/repo")
-		_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
-		return i.runHelm(ctx, kubeconfigPath,
-			"upgrade", "--install", "cloud-controller-manager",
-			"cloud-provider-azure/cloud-controller-manager",
-			"--namespace", "kube-system",
-			"--wait", "--timeout", "5m")
+		return i.installAzureCCM(ctx, kubeconfigPath, clusterName, creds)
 	default:
 		logger.Info("No CCM needed for provider", "provider", provider)
 		return nil
 	}
+}
+
+func (i *Installer) installAWSCCM(ctx context.Context, kubeconfigPath string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
+	if creds == nil || creds.AWS == nil {
+		return fmt.Errorf("AWS credentials required for CCM installation")
+	}
+
+	secretManifest := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-cloud-credentials
+  namespace: kube-system
+type: Opaque
+stringData:
+  access-key-id: "%s"
+  secret-access-key: "%s"
+`, creds.AWS.AccessKeyID, creds.AWS.SecretAccessKey)
+
+	if err := i.applyManifest(ctx, kubeconfigPath, secretManifest, "ccm-aws-secret"); err != nil {
+		return fmt.Errorf("failed to create AWS CCM credentials Secret: %w", err)
+	}
+	logger.Info("Created AWS CCM credentials Secret")
+
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "add", "aws-cloud-controller-manager",
+		"https://kubernetes.github.io/cloud-provider-aws")
+	_ = i.runHelm(ctx, kubeconfigPath, "repo", "update")
+
+	return i.runHelm(ctx, kubeconfigPath,
+		"upgrade", "--install", "aws-cloud-controller-manager",
+		"aws-cloud-controller-manager/aws-cloud-controller-manager",
+		"--namespace", "kube-system",
+		"--set", "env[0].name=AWS_ACCESS_KEY_ID",
+		"--set", "env[0].valueFrom.secretKeyRef.name=aws-cloud-credentials",
+		"--set", "env[0].valueFrom.secretKeyRef.key=access-key-id",
+		"--set", "env[1].name=AWS_SECRET_ACCESS_KEY",
+		"--set", "env[1].valueFrom.secretKeyRef.name=aws-cloud-credentials",
+		"--set", "env[1].valueFrom.secretKeyRef.key=secret-access-key",
+		"--set", fmt.Sprintf("env[2].name=AWS_DEFAULT_REGION,env[2].value=%s", creds.AWS.Region),
+		// Disable route controller (requires --cluster-cidr; Cilium handles pod networking)
+		"--set", "args[0]=--v=2",
+		"--set", "args[1]=--cloud-provider=aws",
+		"--set", "args[2]=--configure-cloud-routes=false",
+		"--set", "nodeSelector=null",
+		"--set", "tolerations[0].operator=Exists",
+		"--wait", "--timeout", "5m",
+	)
+}
+
+func (i *Installer) installGCPCCM(ctx context.Context, kubeconfigPath string, clusterName string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
+	if creds == nil || creds.GCP == nil {
+		return fmt.Errorf("GCP credentials required for CCM installation")
+	}
+
+	network := creds.GCP.Network
+	if network == "" {
+		network = "default"
+	}
+
+	// Encode SA key as base64 for Secret
+	saKeyB64 := base64.StdEncoding.EncodeToString([]byte(creds.GCP.ServiceAccountKey))
+
+	// Deploy CCM via embedded manifests (no upstream Helm chart exists)
+	manifest := fmt.Sprintf(`---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gcp-cloud-config
+  namespace: kube-system
+data:
+  cloud-config: |
+    [global]
+    project-id = %s
+    network-name = %s
+    regional = true
+    node-tags = %s
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gcp-cloud-credentials
+  namespace: kube-system
+type: Opaque
+data:
+  key.json: %s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:cloud-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+  labels:
+    component: cloud-controller-manager
+spec:
+  selector:
+    matchLabels:
+      component: cloud-controller-manager
+  template:
+    metadata:
+      labels:
+        component: cloud-controller-manager
+    spec:
+      serviceAccountName: cloud-controller-manager
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: cloud-controller-manager
+        image: registry.k8s.io/cloud-provider-gcp/cloud-controller-manager:v30.0.0
+        command:
+        - /cloud-controller-manager
+        args:
+        - --cloud-provider=gce
+        - --cloud-config=/etc/kubernetes/cloud-config
+        - --configure-cloud-routes=false
+        - --allocate-node-cidrs=false
+        - --controllers=*,-nodeipam
+        - --v=2
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /etc/kubernetes/gcp/key.json
+        volumeMounts:
+        - name: cloud-config
+          mountPath: /etc/kubernetes/cloud-config
+          subPath: cloud-config
+          readOnly: true
+        - name: gcp-creds
+          mountPath: /etc/kubernetes/gcp
+          readOnly: true
+      volumes:
+      - name: cloud-config
+        configMap:
+          name: gcp-cloud-config
+      - name: gcp-creds
+        secret:
+          secretName: gcp-cloud-credentials
+`, creds.GCP.ProjectID, network, clusterName, saKeyB64)
+
+	if err := i.applyManifest(ctx, kubeconfigPath, manifest, "ccm-gcp"); err != nil {
+		return fmt.Errorf("failed to apply GCP CCM manifests: %w", err)
+	}
+	logger.Info("GCP CCM manifests applied")
+
+	// Wait for DaemonSet to roll out
+	return i.runKubectl(ctx, kubeconfigPath, "rollout", "status", "daemonset/cloud-controller-manager",
+		"-n", "kube-system", "--timeout=5m")
+}
+
+func (i *Installer) installAzureCCM(ctx context.Context, kubeconfigPath string, clusterName string, creds *ProviderCredentials) error {
+	logger := log.FromContext(ctx)
+	if creds == nil || creds.Azure == nil {
+		return fmt.Errorf("Azure credentials required for CCM installation")
+	}
+
+	az := creds.Azure
+
+	// azure.json cloud-config consumed by the CCM binary.
+	// securityGroupName is required for CCM to manage NSG rules for LoadBalancer services.
+	// primaryAvailabilitySetName tells CCM which AvailabilitySet contains nodes for
+	// LB backend pool membership (VMs outside an AvailabilitySet are not added).
+	azureJSON := fmt.Sprintf(`{
+  "cloud": "AzurePublicCloud",
+  "tenantId": "%s",
+  "subscriptionId": "%s",
+  "aadClientId": "%s",
+  "aadClientSecret": "%s",
+  "resourceGroup": "%s",
+  "location": "%s",
+  "vnetName": "%s",
+  "subnetName": "%s",
+  "securityGroupName": "%s",
+  "primaryAvailabilitySetName": "%s-avset",
+  "vmType": "standard",
+  "loadBalancerSku": "Standard",
+  "useInstanceMetadata": true
+}`, az.TenantID, az.SubscriptionID, az.ClientID, az.ClientSecret,
+		az.ResourceGroup, az.Location, az.VNetName, az.SubnetName, az.SecurityGroupName,
+		clusterName)
+
+	azureJSONB64 := base64.StdEncoding.EncodeToString([]byte(azureJSON))
+
+	// Deploy CCM via embedded manifests for full control over config
+	manifest := fmt.Sprintf(`---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-cloud-config
+  namespace: kube-system
+type: Opaque
+data:
+  azure.json: %s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:cloud-controller-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: cloud-controller-manager
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-controller-manager
+  namespace: kube-system
+  labels:
+    component: cloud-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: cloud-controller-manager
+  template:
+    metadata:
+      labels:
+        component: cloud-controller-manager
+    spec:
+      serviceAccountName: cloud-controller-manager
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: cloud-controller-manager
+        image: mcr.microsoft.com/oss/kubernetes/azure-cloud-controller-manager:v1.31.0
+        command:
+        - /usr/local/bin/cloud-controller-manager
+        args:
+        - --cloud-provider=azure
+        - --cloud-config=/etc/kubernetes/azure.json
+        - --configure-cloud-routes=false
+        - --allocate-node-cidrs=false
+        - --controllers=*,-node-route-controller
+        - --cluster-name=%s
+        - --v=2
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "4"
+            memory: 2Gi
+        volumeMounts:
+        - name: azure-config
+          mountPath: /etc/kubernetes/azure.json
+          subPath: azure.json
+          readOnly: true
+      volumes:
+      - name: azure-config
+        secret:
+          secretName: azure-cloud-config
+`, azureJSONB64, clusterName)
+
+	if err := i.applyManifest(ctx, kubeconfigPath, manifest, "ccm-azure"); err != nil {
+		return fmt.Errorf("failed to apply Azure CCM manifests: %w", err)
+	}
+	logger.Info("Azure CCM manifests applied")
+
+	// Wait for Deployment to roll out
+	return i.runKubectl(ctx, kubeconfigPath, "rollout", "status", "deployment/cloud-controller-manager",
+		"-n", "kube-system", "--timeout=5m")
+}
+
+// applyManifest writes a YAML manifest to a temp file and applies it via kubectl.
+func (i *Installer) applyManifest(ctx context.Context, kubeconfigPath string, manifest string, prefix string) error {
+	tmpFile, err := os.CreateTemp("", prefix+"-*.yaml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(manifest); err != nil {
+		return err
+	}
+	tmpFile.Close()
+
+	return i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name())
+}
+
+// SetNodeProviderIDs patches spec.providerID on management cluster nodes by
+// matching InternalIP to the provided privateIP->providerID mapping.
+func (i *Installer) SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) (int, error) {
+	logger := log.FromContext(ctx)
+	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
+
+	if len(nodeProviderIDs) == 0 {
+		return 0, nil
+	}
+
+	args := []string{
+		"--kubeconfig", kubeconfigPath,
+		"--insecure-skip-tls-verify",
+		"get", "nodes",
+		"-o", `jsonpath={range .items[*]}{.metadata.name}{"\t"}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{end}{"\n"}{end}`,
+	}
+	if i.NodeIP != "" {
+		args = append(args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
+	}
+	cmd := exec.CommandContext(ctx, i.KubectlPath, args...)
+	rawOutput, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("failed to list nodes: %w", err)
+	}
+	output := string(rawOutput)
+
+	patched := 0
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		nodeName := parts[0]
+		nodeIP := parts[1]
+
+		providerID, ok := nodeProviderIDs[nodeIP]
+		if !ok {
+			logger.Info("No providerID mapping for node", "node", nodeName, "ip", nodeIP)
+			continue
+		}
+
+		logger.Info("Setting providerID on node", "node", nodeName, "providerID", providerID)
+		patchJSON := fmt.Sprintf(`{"spec":{"providerID":"%s"}}`, providerID)
+		if err := i.runKubectl(ctx, kubeconfigPath, "patch", "node", nodeName,
+			"--type", "merge", "-p", patchJSON); err != nil {
+			return patched, fmt.Errorf("failed to patch node %s providerID: %w", nodeName, err)
+		}
+		patched++
+	}
+
+	logger.Info("Node providerIDs patched", "patched", patched, "total", len(nodeProviderIDs))
+	return patched, nil
 }
 
 // InstallTraefik installs Traefik ingress controller
@@ -776,7 +1115,7 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 	defer cleanup()
 
 	if version == "" {
-		version = "0.1.0"
+		version = "0.3.0"
 	}
 
 	logger.Info("Installing Steward", "version", version)
@@ -864,8 +1203,7 @@ func (i *Installer) InstallButler(ctx context.Context, kubeconfig []byte) error 
 	return nil
 }
 
-// InstallButlerCRDs installs Butler platform CRDs via Helm chart and overlays
-// embedded CRDs to ensure cloud provider fields are present.
+// InstallButlerCRDs installs Butler platform CRDs via Helm chart, overlaying embedded CRDs.
 func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Installing Butler platform CRDs", "version", version)
@@ -987,9 +1325,7 @@ func (i *Installer) waitForButlerCRDs(ctx context.Context, kubeconfigPath string
 	return nil
 }
 
-// applyEmbeddedCRDs applies the embedded CRD YAML files to the target cluster.
-// This overlays any fields that are present in the build but not yet released
-// in the butler-crds Helm chart (e.g., cloud provider fields on ProviderConfig).
+// applyEmbeddedCRDs applies embedded CRDs, overlaying fields ahead of chart releases.
 func (i *Installer) applyEmbeddedCRDs(ctx context.Context, kubeconfigPath string) error {
 	logger := log.FromContext(ctx)
 
@@ -1032,8 +1368,7 @@ func (i *Installer) applyEmbeddedCRDs(ctx context.Context, kubeconfigPath string
 	return nil
 }
 
-// InstallInitialProviderConfig creates the initial ProviderConfig CR and credentials secret
-// on the management cluster based on the provider used during bootstrap.
+// InstallInitialProviderConfig creates the initial ProviderConfig CR and credentials secret.
 func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Creating initial ProviderConfig", "provider", providerType)
@@ -1300,8 +1635,7 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
-// generateGCPProviderConfig returns the Secret and ProviderConfig manifests
-// for a GCP provider on the target management cluster.
+// generateGCPProviderConfig returns Secret and ProviderConfig manifests for GCP.
 func (i *Installer) generateGCPProviderConfig(creds *GCPCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -1359,8 +1693,7 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
-// generateAWSProviderConfig returns the Secret and ProviderConfig manifests
-// for an AWS provider on the target management cluster.
+// generateAWSProviderConfig returns Secret and ProviderConfig manifests for AWS.
 func (i *Installer) generateAWSProviderConfig(creds *AWSCredentials) (string, string) {
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
@@ -1407,9 +1740,17 @@ spec:
 	return secretManifest, providerConfigManifest
 }
 
-// generateAzureProviderConfig returns the Secret and ProviderConfig manifests
-// for an Azure provider on the target management cluster.
+// generateAzureProviderConfig returns Secret and ProviderConfig manifests for Azure.
 func (i *Installer) generateAzureProviderConfig(creds *AzureCredentials) (string, string) {
+	secretData := fmt.Sprintf(`  clientID: "%s"
+  clientSecret: "%s"
+  tenantID: "%s"
+  subscriptionID: "%s"`, creds.ClientID, creds.ClientSecret, creds.TenantID, creds.SubscriptionID)
+	if creds.SecurityGroupName != "" {
+		secretData += fmt.Sprintf(`
+  securityGroupName: "%s"`, creds.SecurityGroupName)
+	}
+
 	secretManifest := fmt.Sprintf(`apiVersion: v1
 kind: Secret
 metadata:
@@ -1417,11 +1758,8 @@ metadata:
   namespace: butler-system
 type: Opaque
 stringData:
-  clientID: "%s"
-  clientSecret: "%s"
-  tenantID: "%s"
-  subscriptionID: "%s"
-`, creds.ClientID, creds.ClientSecret, creds.TenantID, creds.SubscriptionID)
+%s
+`, secretData)
 
 	azureConfig := fmt.Sprintf(`    subscriptionID: "%s"
     resourceGroup: "%s"`, creds.SubscriptionID, creds.ResourceGroup)
@@ -1974,7 +2312,7 @@ spec:
 
 // InstallConsole installs butler-console (server + frontend) on the management cluster
 // Returns the console URL for user output
-func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error) {
+func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error) {
 	logger := log.FromContext(ctx)
 
 	version := "0.4.1"
@@ -2061,6 +2399,21 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 		return "", fmt.Errorf("failed to install butler-console: %w", err)
 	}
 
+	// Patch service to LoadBalancer with provider-specific annotations atomically.
+	// Helm installs as ClusterIP; we patch annotation + type together so CCM
+	// creates the correct LB type on first observation (no orphaned CLB).
+	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
+	if isCloud {
+		patch := `{"spec":{"type":"LoadBalancer"}}`
+		if provider == "aws" {
+			patch = `{"metadata":{"annotations":{"service.beta.kubernetes.io/aws-load-balancer-type":"nlb"}},"spec":{"type":"LoadBalancer"}}`
+		}
+		if err := i.runKubectl(ctx, kubeconfigPath, "patch", "svc", "butler-console-frontend",
+			"-n", "butler-system", "--type", "merge", "-p", patch); err != nil {
+			logger.Error(err, "Failed to patch console service to LoadBalancer")
+		}
+	}
+
 	// Wait for deployments
 	if err := i.runKubectl(ctx, kubeconfigPath,
 		"rollout", "status", "deployment", "butler-console-server",
@@ -2077,10 +2430,12 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 	logger.Info("butler-console installed successfully")
 
 	// Determine URL
-	return i.getConsoleURLFromSpec(ctx, kubeconfigPath, spec, clusterName), nil
+	return i.getConsoleURLFromSpec(ctx, kubeconfigPath, spec, clusterName, provider), nil
 }
 
-func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath string, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) string {
+func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath string, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) string {
+	logger := log.FromContext(ctx)
+
 	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {
 		host := spec.Ingress.Host
 		if host == "" {
@@ -2093,17 +2448,55 @@ func (i *Installer) getConsoleURLFromSpec(ctx context.Context, kubeconfigPath st
 		return fmt.Sprintf("%s://%s", scheme, host)
 	}
 
-	// Try LoadBalancer IP
-	cmd := exec.CommandContext(ctx, i.KubectlPath,
+	// Poll for cloud LoadBalancer endpoint (up to 5 minutes)
+	isCloud := provider == "aws" || provider == "gcp" || provider == "azure"
+	if isCloud {
+		logger.Info("Waiting for cloud LoadBalancer endpoint")
+		for attempt := 0; attempt < 30; attempt++ {
+			if hostname, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].hostname}"); err != nil {
+				logger.Info("Error checking LB hostname, retrying", "error", err)
+			} else if hostname != "" {
+				logger.Info("Console LoadBalancer ready", "hostname", hostname)
+				return fmt.Sprintf("http://%s", hostname)
+			}
+
+			if ip, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].ip}"); err != nil {
+				logger.Info("Error checking LB IP, retrying", "error", err)
+			} else if ip != "" {
+				logger.Info("Console LoadBalancer ready", "ip", ip)
+				return fmt.Sprintf("http://%s", ip)
+			}
+
+			logger.Info("Waiting for console LoadBalancer", "attempt", attempt+1, "of", 30)
+			time.Sleep(10 * time.Second)
+		}
+		logger.Info("Console LoadBalancer not ready after 5 minutes, falling back to port-forward instructions")
+	}
+
+	// On-prem: check for MetalLB-assigned IP
+	if ip, err := i.getServiceField(ctx, kubeconfigPath, "jsonpath={.status.loadBalancer.ingress[0].ip}"); err == nil && ip != "" {
+		return fmt.Sprintf("http://%s", ip)
+	}
+
+	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
+}
+
+// getServiceField extracts a jsonpath field from the console frontend Service.
+func (i *Installer) getServiceField(ctx context.Context, kubeconfigPath string, jsonpath string) (string, error) {
+	args := []string{
 		"--kubeconfig", kubeconfigPath,
 		"--insecure-skip-tls-verify",
 		"get", "svc", "butler-console-frontend",
 		"-n", "butler-system",
-		"-o", "jsonpath={.status.loadBalancer.ingress[0].ip}",
-	)
-	if output, err := cmd.Output(); err == nil && len(output) > 0 {
-		return fmt.Sprintf("http://%s", string(output))
+		"-o", jsonpath,
 	}
-
-	return "kubectl port-forward -n butler-system svc/butler-console-frontend 3000:80"
+	if i.NodeIP != "" {
+		args = append(args, "--server", fmt.Sprintf("https://%s:6443", i.NodeIP))
+	}
+	cmd := exec.CommandContext(ctx, i.KubectlPath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }

@@ -102,7 +102,7 @@ type AddonInstallerInterface interface {
 	InstallCertManager(ctx context.Context, kubeconfig []byte, version string) error
 	InstallLonghorn(ctx context.Context, kubeconfig []byte, version string, replicaCount int32) error
 	InstallMetalLB(ctx context.Context, kubeconfig []byte, addressPool string, topology string) error
-	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string) error
+	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, clusterName string, creds *addons.ProviderCredentials) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error
 	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error
@@ -113,7 +113,9 @@ type AddonInstallerInterface interface {
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
 	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
 	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
-	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string) (string, error)
+	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error)
+	EnsureCloudLBBackendPool(ctx context.Context, kubeconfig []byte, provider string, creds *addons.ProviderCredentials, clusterName string) error
+	SetNodeProviderIDs(ctx context.Context, kubeconfig []byte, provider string, nodeProviderIDs map[string]string) (int, error)
 }
 
 // +kubebuilder:rbac:groups=butler.butlerlabs.dev,resources=clusterbootstraps,verbs=get;list;watch;create;update;patch;delete
@@ -421,7 +423,7 @@ func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, c
 			CPU:         pool.CPU,
 			MemoryMB:    pool.MemoryMB,
 			DiskGB:      pool.DiskGB,
-			Labels:      pool.Labels,
+			Labels:      r.buildMachineLabels(cb, pool.Labels),
 			Image:       imageOverride,
 		},
 	}
@@ -432,6 +434,62 @@ func (r *ClusterBootstrapReconciler) ensureMachineRequest(ctx context.Context, c
 
 	logger.Info("Created MachineRequest", "name", name, "role", role, "image", imageOverride)
 	return nil
+}
+
+// buildMachineLabels merges pool labels with cloud-required instance tags.
+func (r *ClusterBootstrapReconciler) buildMachineLabels(cb *butlerv1alpha1.ClusterBootstrap, poolLabels map[string]string) map[string]string {
+	labels := make(map[string]string)
+	for k, v := range poolLabels {
+		labels[k] = v
+	}
+	if cb.IsCloudProvider() {
+		labels[fmt.Sprintf("kubernetes.io/cluster/%s", cb.Spec.Cluster.Name)] = "owned"
+	}
+	return labels
+}
+
+// buildNodeProviderIDMap builds a privateIP->providerID mapping from MachineRequests.
+func (r *ClusterBootstrapReconciler) buildNodeProviderIDMap(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (map[string]string, error) {
+	machineRequests := &butlerv1alpha1.MachineRequestList{}
+	if err := r.List(ctx, machineRequests, client.InNamespace(cb.Namespace), client.MatchingLabels{
+		"butler.butlerlabs.dev/cluster-bootstrap": cb.Name,
+	}); err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]string)
+	for _, mr := range machineRequests.Items {
+		instanceID := mr.Status.ProviderID
+		if instanceID == "" {
+			continue
+		}
+
+		// IPAddresses[0] is the private IP (matches node InternalIP)
+		if len(mr.Status.IPAddresses) == 0 {
+			continue
+		}
+		privateIP := mr.Status.IPAddresses[0]
+
+		// AZ from provider annotation
+		az := mr.Annotations["butler.butlerlabs.dev/availability-zone"]
+
+		// Provider-specific providerID format
+		switch cb.Spec.Provider {
+		case "aws":
+			if az != "" {
+				result[privateIP] = fmt.Sprintf("aws:///%s/%s", az, instanceID)
+			} else {
+				result[privateIP] = fmt.Sprintf("aws:///%s", instanceID)
+			}
+		case "gcp":
+			// GCP provider stores full providerID: gce://<project>/<zone>/<name>
+			result[privateIP] = instanceID
+		case "azure":
+			// ARM resource IDs start with /subscriptions/... so azure:// + /sub... = azure:///sub...
+			result[privateIP] = fmt.Sprintf("azure://%s", instanceID)
+		}
+	}
+	return result, nil
 }
 
 func (r *ClusterBootstrapReconciler) updateMachineStatuses(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) error {
@@ -511,11 +569,13 @@ func (r *ClusterBootstrapReconciler) reconcileConfiguringTalos(ctx context.Conte
 			TalosVersion:                   cb.Spec.Talos.Version,
 			InstallDisk:                    cb.Spec.Talos.InstallDisk,
 			Platform:                       r.getTalosPlatform(cb.Spec.Provider),
-			AllowSchedulingOnControlPlanes: cb.IsSingleNode(), // Enable for single-node
+			AllowSchedulingOnControlPlanes: cb.IsSingleNode() || cb.Spec.Cluster.Workers == nil || cb.Spec.Cluster.Workers.Replicas == 0,
 		}
 
 		if cb.IsSingleNode() {
 			logger.Info("Single-node mode: enabling workload scheduling on control planes")
+		} else if cb.Spec.Cluster.Workers == nil || cb.Spec.Cluster.Workers.Replicas == 0 {
+			logger.Info("No workers configured: enabling workload scheduling on control planes")
 		}
 
 		// Convert config patches
@@ -818,14 +878,60 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 2.5 Cloud Controller Manager - skipped for management cluster bootstrap.
-	// Management clusters don't need CCM. Setting --cloud-provider=external
-	// on kubelet adds an "uninitialized" taint that blocks all pod scheduling
-	// until CCM runs, creating a deadlock. Tenant clusters on cloud providers
-	// get CCM installed by butler-controller via CAPI machine templates.
+	// 2.5 Cloud Controller Manager (service-controller-only mode; see talos/client.go
+	// for why we don't set --cloud-provider=external on kubelet).
 	if cb.IsCloudProvider() {
-		r.ensureAddonsMap(cb)
-		cb.Status.AddonsInstalled["cloud-controller-manager"] = true
+		if !r.isAddonInstalled(cb, "cloud-controller-manager") {
+			logger.Info("Installing Cloud Controller Manager")
+			creds, err := r.getProviderCredentials(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to get provider credentials for CCM")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			if err := r.AddonInstaller.InstallCloudControllerManager(ctx, kubeconfig, cb.Spec.Provider, cb.Spec.Cluster.Name, creds); err != nil {
+				logger.Error(err, "Failed to install Cloud Controller Manager")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			r.setAddonInstalled(cb, "cloud-controller-manager")
+			logger.Info("Cloud Controller Manager installed successfully")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Error(err, "Failed to update status after CCM install")
+			}
+		}
+
+		// 2.6 Set spec.providerID on nodes (required for LB target registration).
+		// Re-runs until all expected nodes are patched.
+		if !r.isAddonInstalled(cb, "node-provider-ids") {
+			nodeProviderIDs, err := r.buildNodeProviderIDMap(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to build node providerID map")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			patchedCount := 0
+			if len(nodeProviderIDs) > 0 {
+				var patchErr error
+				patchedCount, patchErr = r.AddonInstaller.SetNodeProviderIDs(ctx, kubeconfig, string(cb.Spec.Provider), nodeProviderIDs)
+				if patchErr != nil {
+					logger.Error(patchErr, "Failed to set node providerIDs")
+					return ctrl.Result{RequeueAfter: requeueShort}, nil
+				}
+			}
+			expectedNodes := int(cb.GetControlPlaneReplicas())
+			if cb.Spec.Cluster.Workers != nil {
+				expectedNodes += int(cb.Spec.Cluster.Workers.Replicas)
+			}
+			if patchedCount >= expectedNodes {
+				r.setAddonInstalled(cb, "node-provider-ids")
+				logger.Info("All node providerIDs set", "count", len(nodeProviderIDs))
+				if err := r.Status().Update(ctx, cb); err != nil {
+					logger.Error(err, "Failed to update status after setting providerIDs")
+				}
+			} else {
+				logger.Info("Waiting for all nodes to join before completing providerID setup",
+					"patched", patchedCount, "expected", expectedNodes)
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+		}
 	}
 
 	// 3. cert-manager - needed by Traefik and Steward webhooks
@@ -856,8 +962,6 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Installing Longhorn")
 			version := addons.Storage.Version
 
-			// Use GetStorageReplicaCount() for topology-aware replica count
-			// Returns 1 for single-node, 3 for HA (default)
 			replicas := cb.GetStorageReplicaCount()
 
 			logger.Info("Installing Longhorn with replica count",
@@ -896,12 +1000,12 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	}
 
 	// 6. Traefik ingress - after MetalLB so it can get LoadBalancer IP.
-	// Cloud providers skip Traefik because there is no MetalLB or CCM to
-	// allocate LoadBalancer IPs on the management cluster. Traefik's LB
-	// Service stays <pending> and Helm --wait times out.
+	// Cloud providers skip Traefik. CCM provides LoadBalancer service
+	// support directly; the console gets its own cloud LB via CCM without
+	// needing an ingress controller as intermediary.
 	if !r.isAddonInstalled(cb, "traefik") {
 		if cb.IsCloudProvider() {
-			logger.Info("Skipping Traefik (cloud provider has no MetalLB/CCM for LoadBalancer)")
+			logger.Info("Skipping Traefik (cloud providers use CCM for LoadBalancer services)")
 		} else if addons.Ingress == nil || isAddonEnabled(addons.Ingress.Enabled) {
 			logger.Info("Installing Traefik")
 			version := ""
@@ -1128,7 +1232,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		if !r.isAddonInstalled(cb, "butler-console") {
 			logger.Info("Installing Butler Console")
 
-			consoleURL, err := r.AddonInstaller.InstallConsole(ctx, kubeconfig, addons.Console, cb.Spec.Cluster.Name)
+			consoleURL, err := r.AddonInstaller.InstallConsole(ctx, kubeconfig, addons.Console, cb.Spec.Cluster.Name, cb.Spec.Provider)
 			if err != nil {
 				logger.Error(err, "Failed to install Butler Console")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
@@ -1141,6 +1245,28 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			logger.Info("Butler Console installed successfully", "url", consoleURL)
 			if err := r.Status().Update(ctx, cb); err != nil {
 				logger.Error(err, "Failed to update status after Console install")
+			}
+		}
+	}
+
+	// 12.5 Ensure cloud LB backend pool is populated.
+	// Azure CCM v1.31 with vmType=standard does not auto-populate the backend
+	// pool, leaving the LB unreachable. Add node NICs to the pool directly.
+	if cb.IsCloudProvider() && string(cb.Spec.Provider) == "azure" {
+		if !r.isAddonInstalled(cb, "cloud-lb-backend-pool") {
+			creds, err := r.getProviderCredentials(ctx, cb)
+			if err != nil {
+				logger.Error(err, "Failed to get credentials for LB backend pool")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			if err := r.AddonInstaller.EnsureCloudLBBackendPool(ctx, kubeconfig, string(cb.Spec.Provider), creds, cb.Spec.Cluster.Name); err != nil {
+				logger.Error(err, "Failed to ensure cloud LB backend pool")
+				return ctrl.Result{RequeueAfter: requeueShort}, nil
+			}
+			r.setAddonInstalled(cb, "cloud-lb-backend-pool")
+			logger.Info("Cloud LB backend pool populated")
+			if err := r.Status().Update(ctx, cb); err != nil {
+				logger.Error(err, "Failed to update status after LB backend pool")
 			}
 		}
 	}
@@ -1409,14 +1535,15 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 		logger.Info("Retrieved AWS credentials", "region", creds.AWS.Region)
 	case "azure":
 		creds.Azure = &addons.AzureCredentials{
-			ClientID:       string(secret.Data["clientID"]),
-			ClientSecret:   string(secret.Data["clientSecret"]),
-			TenantID:       string(secret.Data["tenantID"]),
-			SubscriptionID: string(secret.Data["subscriptionID"]),
-			ResourceGroup:  providerConfig.Spec.Azure.ResourceGroup,
-			Location:       providerConfig.Spec.Azure.Location,
-			VNetName:       providerConfig.Spec.Azure.VNetName,
-			SubnetName:     providerConfig.Spec.Azure.SubnetName,
+			ClientID:          string(secret.Data["clientID"]),
+			ClientSecret:      string(secret.Data["clientSecret"]),
+			TenantID:          string(secret.Data["tenantID"]),
+			SubscriptionID:    string(secret.Data["subscriptionID"]),
+			ResourceGroup:     providerConfig.Spec.Azure.ResourceGroup,
+			Location:          providerConfig.Spec.Azure.Location,
+			VNetName:          providerConfig.Spec.Azure.VNetName,
+			SubnetName:        providerConfig.Spec.Azure.SubnetName,
+			SecurityGroupName: string(secret.Data["securityGroupName"]),
 		}
 		logger.Info("Retrieved Azure credentials", "subscriptionID", creds.Azure.SubscriptionID, "resourceGroup", creds.Azure.ResourceGroup)
 	}
@@ -1536,14 +1663,15 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 			return nil, fmt.Errorf("ProviderConfig %s has no azure configuration", providerConfigKey)
 		}
 		creds.Azure = &addons.AzureCredentials{
-			ClientID:       string(secret.Data["clientID"]),
-			ClientSecret:   string(secret.Data["clientSecret"]),
-			TenantID:       string(secret.Data["tenantID"]),
-			SubscriptionID: string(secret.Data["subscriptionID"]),
-			ResourceGroup:  providerConfig.Spec.Azure.ResourceGroup,
-			Location:       providerConfig.Spec.Azure.Location,
-			VNetName:       providerConfig.Spec.Azure.VNetName,
-			SubnetName:     providerConfig.Spec.Azure.SubnetName,
+			ClientID:          string(secret.Data["clientID"]),
+			ClientSecret:      string(secret.Data["clientSecret"]),
+			TenantID:          string(secret.Data["tenantID"]),
+			SubscriptionID:    string(secret.Data["subscriptionID"]),
+			ResourceGroup:     providerConfig.Spec.Azure.ResourceGroup,
+			Location:          providerConfig.Spec.Azure.Location,
+			VNetName:          providerConfig.Spec.Azure.VNetName,
+			SubnetName:        providerConfig.Spec.Azure.SubnetName,
+			SecurityGroupName: string(secret.Data["securityGroupName"]),
 		}
 		logger.Info("Extracted Azure credentials",
 			"subscriptionID", creds.Azure.SubscriptionID,
@@ -1920,25 +2048,34 @@ func (r *ClusterBootstrapReconciler) updateLoadBalancerTargets(ctx context.Conte
 		if m.IPAddress == "" {
 			continue
 		}
-		targets = append(targets, butlerv1alpha1.LoadBalancerTarget{
+		target := butlerv1alpha1.LoadBalancerTarget{
 			IP:           m.IPAddress,
 			InstanceName: m.Name,
-		})
+		}
+		// Look up MachineRequest to get provider-specific instance ID
+		// (e.g., EC2 instance ID for AWS NLB target registration).
+		mr := &butlerv1alpha1.MachineRequest{}
+		if err := r.Get(ctx, client.ObjectKey{Name: m.Name, Namespace: cb.Namespace}, mr); err == nil {
+			if mr.Status.ProviderID != "" {
+				target.InstanceID = mr.Status.ProviderID
+			}
+		}
+		targets = append(targets, target)
 	}
 
 	if len(targets) == 0 {
 		return nil
 	}
 
-	// Only update if targets changed
+	// Only update if targets changed (check IP and InstanceID)
 	if len(targets) == len(lbr.Spec.Targets) {
 		changed := false
-		existing := make(map[string]bool)
+		existing := make(map[string]string) // IP -> InstanceID
 		for _, t := range lbr.Spec.Targets {
-			existing[t.IP] = true
+			existing[t.IP] = t.InstanceID
 		}
 		for _, t := range targets {
-			if !existing[t.IP] {
+			if existingID, ok := existing[t.IP]; !ok || existingID != t.InstanceID {
 				changed = true
 				break
 			}
