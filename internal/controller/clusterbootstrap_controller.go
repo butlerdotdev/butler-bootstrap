@@ -981,12 +981,13 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 5. MetalLB
-	if addons.LoadBalancer != nil && addons.LoadBalancer.Type == "metallb" && addons.LoadBalancer.AddressPool != "" {
+	// 5. MetalLB — prefers network.loadBalancerPool over deprecated addons field
+	addressPool := cb.GetLoadBalancerAddressPool()
+	if addons.LoadBalancer != nil && addons.LoadBalancer.Type == "metallb" && addressPool != "" {
 		if !r.isAddonInstalled(cb, "metallb") {
-			logger.Info("Installing MetalLB")
+			logger.Info("Installing MetalLB", "addressPool", addressPool)
 
-			if err := r.AddonInstaller.InstallMetalLB(ctx, kubeconfig, addons.LoadBalancer.AddressPool, string(cb.Spec.Cluster.Topology)); err != nil {
+			if err := r.AddonInstaller.InstallMetalLB(ctx, kubeconfig, addressPool, string(cb.Spec.Cluster.Topology)); err != nil {
 				logger.Error(err, "Failed to install MetalLB")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
@@ -1814,7 +1815,9 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 		bc := &butlerv1alpha1.ButlerConfig{}
 		if err := r.Get(ctx, client.ObjectKey{Name: "butler"}, bc); err != nil {
 			if errors.IsNotFound(err) {
-				return "", fmt.Errorf("schematicID %q is set but no ButlerConfig exists", schematicID)
+				// No ButlerConfig during bootstrap — skip image sync
+				logger.V(1).Info("No ButlerConfig found, skipping image sync", "schematicID", schematicID)
+				return "", nil
 			}
 			return "", fmt.Errorf("failed to get ButlerConfig: %w", err)
 		}
