@@ -2316,7 +2316,7 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 	logger := log.FromContext(ctx)
 
 	version := "0.4.1"
-	if spec != nil && spec.Version != "" {
+	if spec != nil && spec.Version != "" && !strings.EqualFold(spec.Version, "latest") {
 		version = spec.Version
 	}
 
