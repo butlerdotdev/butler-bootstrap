@@ -732,8 +732,9 @@ func (r *ClusterBootstrapReconciler) reconcileBootstrappingCluster(ctx context.C
 			// Retry on transient errors (node still booting)
 			if strings.Contains(err.Error(), "connection refused") ||
 				strings.Contains(err.Error(), "connection reset") ||
-				strings.Contains(err.Error(), "i/o timeout") ||
-				strings.Contains(err.Error(), "bootstrap is not available yet") {
+				strings.Contains(err.Error(), "no route to host") ||
+				strings.Contains(err.Error(), "bootstrap is not available yet") ||
+				strings.Contains(err.Error(), "i/o timeout") {
 				logger.Info("Bootstrap failed, node may still be starting, retrying", "error", err)
 				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 			}
@@ -1520,7 +1521,7 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 		logger.Info("Retrieved GCP credentials", "projectID", creds.GCP.ProjectID, "region", creds.GCP.Region)
 	case "aws":
 		creds.AWS = &addons.AWSCredentials{
-			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			AccessKeyID:     string(secret.Data["accessKeyID"]),
 			SecretAccessKey: string(secret.Data["secretAccessKey"]),
 			Region:          providerConfig.Spec.AWS.Region,
 		}
@@ -1644,7 +1645,7 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 			return nil, fmt.Errorf("ProviderConfig %s has no aws configuration", providerConfigKey)
 		}
 		creds.AWS = &addons.AWSCredentials{
-			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			AccessKeyID:     string(secret.Data["accessKeyID"]),
 			SecretAccessKey: string(secret.Data["secretAccessKey"]),
 			Region:          providerConfig.Spec.AWS.Region,
 			VPCID:           providerConfig.Spec.AWS.VPCID,
@@ -1928,11 +1929,11 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 			Name:      imageSyncName,
 			Namespace: cb.Namespace,
 			Labels: map[string]string{
-				butlerv1alpha1.LabelManagedBy:       "butler",
-				butlerv1alpha1.LabelSchematicID:     labelSchematicID,
-				butlerv1alpha1.LabelImageVersion:    version,
-				butlerv1alpha1.LabelProviderConfig:  cb.Spec.ProviderRef.Name,
-				butlerv1alpha1.LabelImageArch:       arch,
+				butlerv1alpha1.LabelManagedBy:      "butler",
+				butlerv1alpha1.LabelSchematicID:    labelSchematicID,
+				butlerv1alpha1.LabelImageVersion:   version,
+				butlerv1alpha1.LabelProviderConfig: cb.Spec.ProviderRef.Name,
+				butlerv1alpha1.LabelImageArch:      arch,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
