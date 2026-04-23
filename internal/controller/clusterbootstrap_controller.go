@@ -111,7 +111,7 @@ type AddonInstallerInterface interface {
 	InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error
 	InstallInitialProviderConfig(ctx context.Context, kubeconfig []byte, providerType string, creds *addons.ProviderCredentials) error
 	InstallCAPI(ctx context.Context, kubeconfig []byte, version string, mgmtProvider string, additionalProviders []butlerv1alpha1.CAPIInfraProviderSpec, creds *addons.ProviderCredentials) error
-	InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error
+	InstallButlerController(ctx context.Context, kubeconfig []byte, image string, version string) error
 	InstallButlerAddons(ctx context.Context, kubeconfig []byte, version string) error
 	InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error)
 	EnsureCloudLBBackendPool(ctx context.Context, kubeconfig []byte, provider string, creds *addons.ProviderCredentials, clusterName string) error
@@ -1175,7 +1175,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 			image := addons.GetButlerControllerImage()
 			logger.Info("Installing Butler Controller", "image", image)
 
-			if err := r.AddonInstaller.InstallButlerController(ctx, kubeconfig, image); err != nil {
+			if err := r.AddonInstaller.InstallButlerController(ctx, kubeconfig, image, ""); err != nil {
 				logger.Error(err, "Failed to install Butler Controller")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
