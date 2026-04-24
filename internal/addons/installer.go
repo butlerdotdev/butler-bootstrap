@@ -2116,9 +2116,10 @@ func (i *Installer) getCAPINamespaces(ctx context.Context, kubeconfigPath string
 }
 
 // InstallButlerController installs butler-controller on the management cluster
-func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []byte, image string) error {
+// via the butler-controller Helm chart from the Butler OCI registry.
+func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []byte, image string, version string) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Installing butler-controller", "image", image)
+	logger.Info("Installing butler-controller", "image", image, "chartVersion", version)
 
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -2126,188 +2127,60 @@ func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []by
 	}
 	defer cleanup()
 
-	// Ensure namespace exists first
 	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "butler-system"); err != nil {
-		return fmt.Errorf("failed to create butler-system namespace: %w", err)
+		return fmt.Errorf("failed to prepare butler-system namespace: %w", err)
 	}
 
-	manifest := i.generateButlerControllerManifest(image)
-
-	tmpFile, err := os.CreateTemp("", "butler-controller-*.yaml")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.WriteString(manifest); err != nil {
-		return err
-	}
-	tmpFile.Close()
-
-	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "-f", tmpFile.Name()); err != nil {
-		return fmt.Errorf("failed to apply butler-controller: %w", err)
+	if version == "" {
+		version = "0.12.1"
 	}
 
-	// Wait for deployment
+	repo, tag := splitImageRef(image)
+
 	args := []string{
-		"rollout", "status", "deployment", "butler-controller",
+		"upgrade", "--install",
+		"butler-controller",
+		"oci://ghcr.io/butlerdotdev/charts/butler-controller",
+		"--version", version,
 		"-n", "butler-system",
-		"--timeout=3m",
+		"--wait",
+		"--timeout", "5m",
+	}
+	if repo != "" {
+		args = append(args, "--set", "image.repository="+repo)
+	}
+	if tag != "" {
+		args = append(args, "--set", "image.tag="+tag)
 	}
 
-	if err := i.runKubectl(ctx, kubeconfigPath, args...); err != nil {
-		return fmt.Errorf("butler-controller not ready: %w", err)
+	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {
+		return fmt.Errorf("failed to install butler-controller: %w", err)
 	}
 
 	logger.Info("butler-controller installed successfully")
 	return nil
 }
 
-// generateButlerControllerManifest generates the deployment manifest
-func (i *Installer) generateButlerControllerManifest(image string) string {
-	return fmt.Sprintf(`---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: butler-controller
-  namespace: butler-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: butler-controller-role
-rules:
-# Butler CRDs
-- apiGroups: ["butler.butlerlabs.dev"]
-  resources: ["*"]
-  verbs: ["*"]
-# CAPI resources
-- apiGroups: ["cluster.x-k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["infrastructure.cluster.x-k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["controlplane.cluster.x-k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["bootstrap.cluster.x-k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-# Steward resources (hosted control planes)
-- apiGroups: ["steward.butlerlabs.dev"]
-  resources: ["*"]
-  verbs: ["*"]
-# Legacy Kamaji resources (for CAPI provider compatibility during transition)
-- apiGroups: ["kamaji.clastix.io"]
-  resources: ["*"]
-  verbs: ["*"]
-# Core resources - needed for Helm chart installs in ANY namespace
-- apiGroups: [""]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["apps"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["batch"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["rbac.authorization.k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["networking.k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["policy"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["autoscaling"]
-  resources: ["*"]
-  verbs: ["*"]
-# Gateway API resources
-- apiGroups: ["gateway.networking.k8s.io"]
-  resources: ["*"]
-  verbs: ["*"]
-# Flux
-- apiGroups: ["helm.toolkit.fluxcd.io"]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: ["source.toolkit.fluxcd.io"]
-  resources: ["*"]
-  verbs: ["*"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: butler-controller-rolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: butler-controller-role
-subjects:
-- kind: ServiceAccount
-  name: butler-controller
-  namespace: butler-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: butler-controller-leader-election
-  namespace: butler-system
-rules:
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: [""]
-  resources: ["events"]
-  verbs: ["create", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: butler-controller-leader-election
-  namespace: butler-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: butler-controller-leader-election
-subjects:
-- kind: ServiceAccount
-  name: butler-controller
-  namespace: butler-system
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: butler-controller
-  namespace: butler-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: butler-controller
-  template:
-    metadata:
-      labels:
-        app: butler-controller
-    spec:
-      serviceAccountName: butler-controller
-      containers:
-      - name: manager
-        image: %s
-        args:
-        - --leader-elect
-        ports:
-        - containerPort: 8080
-        - containerPort: 8081
-        resources:
-          limits:
-            cpu: 500m
-            memory: 256Mi
-          requests:
-            cpu: 100m
-            memory: 128Mi
-`, image)
+// splitImageRef splits a "repo:tag" image reference into its components.
+// It handles registries with ports (e.g. "registry.io:5000/repo:tag") by
+// splitting on the last colon after the last slash. Returns empty strings
+// for empty input, and ("ref", "") when the input has no tag separator.
+//
+// This function expects tag-based references. Digest-based references
+// (e.g. "repo@sha256:...") are not supported by this helper — bootstrap
+// constructs image strings via GetButlerControllerImage() which always
+// produces "repo:tag" form, so digest handling is unnecessary here.
+func splitImageRef(ref string) (string, string) {
+	if ref == "" {
+		return "", ""
+	}
+	slash := strings.LastIndex(ref, "/")
+	tail := ref[slash+1:]
+	colon := strings.LastIndex(tail, ":")
+	if colon < 0 {
+		return ref, ""
+	}
+	return ref[:slash+1+colon], tail[colon+1:]
 }
 
 // InstallConsole installs butler-console (server + frontend) on the management cluster
