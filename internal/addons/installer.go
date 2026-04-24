@@ -2132,7 +2132,7 @@ func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []by
 	}
 
 	if version == "" {
-		version = "0.12.1"
+		version = "0.12.2"
 	}
 
 	repo, tag := splitImageRef(image)
