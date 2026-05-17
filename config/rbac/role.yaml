@@ -17,6 +17,18 @@ rules:
 - apiGroups:
   - butler.butlerlabs.dev
   resources:
+  - butlerconfigs
+  - loadbalancerrequests
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - butler.butlerlabs.dev
+  resources:
   - clusterbootstraps
   - machinerequests
   verbs:
@@ -41,6 +53,21 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - butler.butlerlabs.dev
+  resources:
+  - imagesyncs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - butler.butlerlabs.dev
+  resources:
+  - loadbalancerrequests/status
+  verbs:
+  - get
 - apiGroups:
   - butler.butlerlabs.dev
   resources:

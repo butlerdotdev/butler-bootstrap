@@ -100,11 +100,11 @@ type GCPCredentials struct {
 // AWSCredentials contains IAM credentials and VPC config.
 type AWSCredentials struct {
 	AccessKeyID     string
-	SecretAccessKey  string
-	Region           string
-	VPCID            string
-	SubnetID         string
-	SecurityGroupID  string
+	SecretAccessKey string
+	Region          string
+	VPCID           string
+	SubnetID        string
+	SecurityGroupID string
 }
 
 // AzureCredentials contains Azure service principal and resource group config.
@@ -406,7 +406,7 @@ func (i *Installer) InstallCilium(ctx context.Context, kubeconfig []byte, versio
 	defer cleanup()
 
 	if version == "" {
-		version = "1.17.0"
+		version = "1.19.4"
 	}
 
 	logger.Info("Installing Cilium", "version", version)
@@ -466,7 +466,7 @@ func (i *Installer) InstallCertManager(ctx context.Context, kubeconfig []byte, v
 	defer cleanup()
 
 	if version == "" {
-		version = "v1.16.2"
+		version = "v1.20.2"
 	}
 
 	logger.Info("Installing cert-manager", "version", version)
@@ -510,7 +510,7 @@ func (i *Installer) InstallLonghorn(ctx context.Context, kubeconfig []byte, vers
 	defer cleanup()
 
 	if version == "" {
-		version = "1.7.2"
+		version = "1.11.2"
 	}
 	if replicaCount == 0 {
 		replicaCount = 2
@@ -1074,7 +1074,7 @@ func (i *Installer) InstallGatewayAPI(ctx context.Context, kubeconfig []byte, ve
 	defer cleanup()
 
 	if version == "" {
-		version = "v1.2.1"
+		version = "v1.5.1"
 	}
 
 	logger.Info("Installing Gateway API CRDs", "version", version)
@@ -1115,7 +1115,7 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 	defer cleanup()
 
 	if version == "" {
-		version = "0.3.0"
+		version = "0.4.0"
 	}
 
 	logger.Info("Installing Steward", "version", version)
@@ -1219,7 +1219,7 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 	}
 
 	if version == "" {
-		version = "0.6.0"
+		version = "0.20.0"
 	}
 
 	args := []string{
@@ -1266,7 +1266,7 @@ func (i *Installer) InstallButlerAddons(ctx context.Context, kubeconfig []byte, 
 	defer cleanup()
 
 	if version == "" {
-		version = "0.1.0"
+		version = "0.8.4"
 	}
 
 	args := []string{
@@ -1843,7 +1843,7 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	// Install Steward CAPI provider manually
 	// Use server-side apply to avoid annotation size limit (CRD is too large for client-side apply)
 	logger.Info("Installing Steward CAPI provider manually")
-	stewardURL := "https://github.com/butlerdotdev/cluster-api-control-plane-provider-steward/releases/download/v0.1.0/control-plane-components.yaml"
+	stewardURL := "https://github.com/butlerdotdev/cluster-api-control-plane-provider-steward/releases/download/v0.3.0/control-plane-components.yaml"
 	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", stewardURL); err != nil {
 		return fmt.Errorf("failed to install Steward CAPI provider: %w", err)
 	}
@@ -1913,22 +1913,22 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
 	case "nutanix":
 		namespace = "capx-system"
-		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.4.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.8.4/infrastructure-components.yaml"
 	case "vsphere":
 		namespace = "capv-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.11.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.16.1/infrastructure-components.yaml"
 	case "proxmox":
 		namespace = "capmox-system"
-		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.6.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.8.1/infrastructure-components.yaml"
 	case "gcp":
 		namespace = "capg-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.8.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.11.2/infrastructure-components.yaml"
 	case "aws":
 		namespace = "capa-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v2.7.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v2.11.1/infrastructure-components.yaml"
 	case "azure":
 		namespace = "capz-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-azure/releases/download/v1.17.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-azure/releases/download/v1.24.0/infrastructure-components.yaml"
 	default:
 		logger.Info("Unknown provider, skipping", "provider", provider)
 		return nil
@@ -2132,7 +2132,7 @@ func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []by
 	}
 
 	if version == "" {
-		version = "0.12.2"
+		version = "0.27.0"
 	}
 
 	repo, tag := splitImageRef(image)
@@ -2188,7 +2188,7 @@ func splitImageRef(ref string) (string, string) {
 func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error) {
 	logger := log.FromContext(ctx)
 
-	version := "0.4.1"
+	version := "0.13.1"
 	if spec != nil && spec.Version != "" && !strings.EqualFold(spec.Version, "latest") {
 		version = spec.Version
 	}
@@ -2212,11 +2212,7 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 		return "", fmt.Errorf("failed to prepare steward-system namespace: %w", err)
 	}
 
-	// Build helm values
-	values := []string{
-		"server.image.tag=latest",
-		"frontend.image.tag=latest",
-	}
+	values := []string{}
 
 	// Configure ingress if enabled
 	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {

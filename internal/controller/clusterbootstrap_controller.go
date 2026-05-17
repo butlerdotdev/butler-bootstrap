@@ -1032,7 +1032,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	// Install before Steward so the CRDs exist when Steward starts watching them
 	if !r.isAddonInstalled(cb, "gateway-api") {
 		logger.Info("Installing Gateway API CRDs")
-		if err := r.AddonInstaller.InstallGatewayAPI(ctx, kubeconfig, "v1.2.0"); err != nil {
+		if err := r.AddonInstaller.InstallGatewayAPI(ctx, kubeconfig, "v1.5.1"); err != nil {
 			logger.Error(err, "Failed to install Gateway API CRDs")
 			return ctrl.Result{RequeueAfter: requeueShort}, nil
 		}
@@ -1155,7 +1155,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	if addons.IsButlerControllerEnabled() {
 		if !r.isAddonInstalled(cb, "butler-addons") {
 			logger.Info("Installing Butler addon definitions")
-			if err := r.AddonInstaller.InstallButlerAddons(ctx, kubeconfig, "0.1.0"); err != nil {
+			if err := r.AddonInstaller.InstallButlerAddons(ctx, kubeconfig, "0.8.4"); err != nil {
 				logger.Error(err, "Failed to install Butler addon definitions")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
@@ -1520,7 +1520,7 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 		logger.Info("Retrieved GCP credentials", "projectID", creds.GCP.ProjectID, "region", creds.GCP.Region)
 	case "aws":
 		creds.AWS = &addons.AWSCredentials{
-			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			AccessKeyID:     string(secret.Data["accessKeyID"]),
 			SecretAccessKey: string(secret.Data["secretAccessKey"]),
 			Region:          providerConfig.Spec.AWS.Region,
 		}
@@ -1644,7 +1644,7 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 			return nil, fmt.Errorf("ProviderConfig %s has no aws configuration", providerConfigKey)
 		}
 		creds.AWS = &addons.AWSCredentials{
-			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			AccessKeyID:     string(secret.Data["accessKeyID"]),
 			SecretAccessKey: string(secret.Data["secretAccessKey"]),
 			Region:          providerConfig.Spec.AWS.Region,
 			VPCID:           providerConfig.Spec.AWS.VPCID,
@@ -1928,11 +1928,11 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 			Name:      imageSyncName,
 			Namespace: cb.Namespace,
 			Labels: map[string]string{
-				butlerv1alpha1.LabelManagedBy:       "butler",
-				butlerv1alpha1.LabelSchematicID:     labelSchematicID,
-				butlerv1alpha1.LabelImageVersion:    version,
-				butlerv1alpha1.LabelProviderConfig:  cb.Spec.ProviderRef.Name,
-				butlerv1alpha1.LabelImageArch:       arch,
+				butlerv1alpha1.LabelManagedBy:      "butler",
+				butlerv1alpha1.LabelSchematicID:    labelSchematicID,
+				butlerv1alpha1.LabelImageVersion:   version,
+				butlerv1alpha1.LabelProviderConfig: cb.Spec.ProviderRef.Name,
+				butlerv1alpha1.LabelImageArch:      arch,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
