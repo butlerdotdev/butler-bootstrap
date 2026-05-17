@@ -406,7 +406,7 @@ func (i *Installer) InstallCilium(ctx context.Context, kubeconfig []byte, versio
 	defer cleanup()
 
 	if version == "" {
-		version = "1.19.4"
+		version = "1.17.0"
 	}
 
 	logger.Info("Installing Cilium", "version", version)
@@ -466,7 +466,7 @@ func (i *Installer) InstallCertManager(ctx context.Context, kubeconfig []byte, v
 	defer cleanup()
 
 	if version == "" {
-		version = "v1.20.2"
+		version = "v1.16.2"
 	}
 
 	logger.Info("Installing cert-manager", "version", version)
@@ -510,7 +510,7 @@ func (i *Installer) InstallLonghorn(ctx context.Context, kubeconfig []byte, vers
 	defer cleanup()
 
 	if version == "" {
-		version = "1.11.2"
+		version = "1.7.2"
 	}
 	if replicaCount == 0 {
 		replicaCount = 2
@@ -1074,7 +1074,7 @@ func (i *Installer) InstallGatewayAPI(ctx context.Context, kubeconfig []byte, ve
 	defer cleanup()
 
 	if version == "" {
-		version = "v1.5.1"
+		version = "v1.2.1"
 	}
 
 	logger.Info("Installing Gateway API CRDs", "version", version)
@@ -1913,22 +1913,22 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
 	case "nutanix":
 		namespace = "capx-system"
-		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.8.4/infrastructure-components.yaml"
+		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.4.0/infrastructure-components.yaml"
 	case "vsphere":
 		namespace = "capv-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.16.1/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.11.0/infrastructure-components.yaml"
 	case "proxmox":
 		namespace = "capmox-system"
-		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.8.1/infrastructure-components.yaml"
+		providerURL = "https://github.com/ionos-cloud/cluster-api-provider-proxmox/releases/download/v0.6.0/infrastructure-components.yaml"
 	case "gcp":
 		namespace = "capg-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.11.2/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-gcp/releases/download/v1.8.0/infrastructure-components.yaml"
 	case "aws":
 		namespace = "capa-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v2.11.1/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-aws/releases/download/v2.7.0/infrastructure-components.yaml"
 	case "azure":
 		namespace = "capz-system"
-		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-azure/releases/download/v1.24.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-azure/releases/download/v1.17.0/infrastructure-components.yaml"
 	default:
 		logger.Info("Unknown provider, skipping", "provider", provider)
 		return nil
