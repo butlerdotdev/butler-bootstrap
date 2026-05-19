@@ -349,6 +349,14 @@ spec:
                     description: Subnet is the network name for VM placement (e.g.,
                       "VM Network - VLAN 40").
                     type: string
+                  timeServers:
+                    description: |-
+                      TimeServers are the default NTP servers for Talos worker nodes on this provider.
+                      Falls back to ButlerConfig.spec.defaultTimeServers if empty.
+                      Required on networks where the Talos default (time.cloudflare.com) is unreachable.
+                    items:
+                      type: string
+                    type: array
                 type: object
               nutanix:
                 description: |-

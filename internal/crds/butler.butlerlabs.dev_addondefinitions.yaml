@@ -87,6 +87,10 @@ spec:
                 - backup
                 - gitops
                 - security
+                - dns
+                - database
+                - messaging
+                - service-mesh
                 - other
                 type: string
               chart:
@@ -170,6 +174,16 @@ spec:
                 description: Icon is an emoji or icon identifier for UI display.
                 maxLength: 8
                 type: string
+              iconData:
+                description: |-
+                  IconData is a base64-encoded SVG used for inline icon rendering
+                  in the addon catalog UI. Allows self-contained operation without
+                  external image hosting, which is required for air-gapped deployments.
+                  Custom addon authors set this field to embed their own project logo.
+                  When present, takes precedence over the Icon emoji field.
+                  Tracked in butlerdotdev/butler-api#37.
+                maxLength: 131072
+                type: string
               links:
                 description: Links provides URLs for documentation, source, etc.
                 properties:
@@ -200,6 +214,20 @@ spec:
                   Platform addons are installed during cluster bootstrap and cannot
                   be uninstalled via the UI. They appear in a separate section.
                 type: boolean
+              tier:
+                description: |-
+                  Tier controls which directory the addon is placed in during GitOps
+                  export: "infrastructure" or "apps". Infrastructure-tier addons
+                  provide CRDs or platform prerequisites that must exist before
+                  workloads that consume them. When set, this takes precedence over
+                  the Platform field for directory placement. When empty, inferred
+                  from Platform: platform addons default to "infrastructure",
+                  non-platform addons default to "apps".
+                  See ADR-015 for design rationale. Tracked in butler-controller#79.
+                enum:
+                - infrastructure
+                - apps
+                type: string
             required:
             - category
             - chart
