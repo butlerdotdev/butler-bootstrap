@@ -1913,7 +1913,7 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
 	case "nutanix":
 		namespace = "capx-system"
-		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.4.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.8.4/infrastructure-components.yaml"
 	case "vsphere":
 		namespace = "capv-system"
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.11.0/infrastructure-components.yaml"
