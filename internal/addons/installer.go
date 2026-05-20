@@ -2188,7 +2188,7 @@ func splitImageRef(ref string) (string, string) {
 func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error) {
 	logger := log.FromContext(ctx)
 
-	version := "0.13.2"
+	version := "0.13.3"
 	if spec != nil && spec.Version != "" && !strings.EqualFold(spec.Version, "latest") {
 		version = spec.Version
 	}
