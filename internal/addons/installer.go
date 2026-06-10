@@ -100,11 +100,11 @@ type GCPCredentials struct {
 // AWSCredentials contains IAM credentials and VPC config.
 type AWSCredentials struct {
 	AccessKeyID     string
-	SecretAccessKey  string
-	Region           string
-	VPCID            string
-	SubnetID         string
-	SecurityGroupID  string
+	SecretAccessKey string
+	Region          string
+	VPCID           string
+	SubnetID        string
+	SecurityGroupID string
 }
 
 // AzureCredentials contains Azure service principal and resource group config.
@@ -1412,6 +1412,9 @@ func (i *Installer) InstallInitialProviderConfig(ctx context.Context, kubeconfig
 			return fmt.Errorf("azure credentials required")
 		}
 		secretManifest, providerConfigManifest = i.generateAzureProviderConfig(creds.Azure)
+	case "local":
+		// The local provider needs no credentials Secret.
+		secretManifest, providerConfigManifest = "", i.generateLocalProviderConfig()
 	default:
 		logger.Info("Provider type not yet supported for ProviderConfig creation, skipping", "provider", providerType)
 		return nil
@@ -1573,6 +1576,25 @@ spec:
 `, harvesterConfig)
 
 	return secretManifest, providerConfigManifest
+}
+
+// generateLocalProviderConfig returns the ProviderConfig manifest for the local provider.
+// It has no credentials Secret, is platform-scoped, and uses cloud network mode so the
+// IPAM path is skipped (CAPD manages container networking).
+func (i *Installer) generateLocalProviderConfig() string {
+	return `apiVersion: butler.butlerlabs.dev/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: local
+  namespace: butler-system
+spec:
+  provider: local
+  scope:
+    type: platform
+  network:
+    mode: cloud
+  local: {}
+`
 }
 
 func (i *Installer) generateVSphereProviderConfig(creds *VSphereCredentials) (string, string) {
@@ -1854,7 +1876,7 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	// be installed post-bootstrap; core + capi-steward are sufficient.
 	// On-prem providers (harvester, nutanix, proxmox): Fatal. These providers don't have the
 	// cert-manager webhook dependency issue and must succeed for bootstrap to proceed.
-	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, creds); err != nil {
+	if err := i.installInfraProvider(ctx, kubeconfigPath, mgmtProvider, version, creds); err != nil {
 		if isCloudProvider(mgmtProvider) {
 			logger.Info("Infrastructure provider install failed (non-fatal for cloud provider, can be installed post-bootstrap)", "provider", mgmtProvider, "error", err)
 		} else {
@@ -1865,7 +1887,7 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	// Install any additional providers
 	for _, p := range additionalProviders {
 		if p.Name != mgmtProvider {
-			if err := i.installInfraProvider(ctx, kubeconfigPath, p.Name, creds); err != nil {
+			if err := i.installInfraProvider(ctx, kubeconfigPath, p.Name, version, creds); err != nil {
 				logger.Info("Failed to install additional provider", "provider", p.Name, "error", err)
 			}
 		}
@@ -1901,13 +1923,19 @@ func isCloudProvider(provider string) bool {
 	return false
 }
 
-func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string, creds *ProviderCredentials) error {
+func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath string, provider string, capiVersion string, creds *ProviderCredentials) error {
 	logger := log.FromContext(ctx)
 
 	var providerURL string
 	var namespace string
 
 	switch provider {
+	case "local":
+		// CAPD (Cluster API Docker provider) ships in the core cluster-api release as
+		// development components. Its version MUST match the CAPI core version installed
+		// by clusterctl init, otherwise the contract versions diverge. Validate live.
+		namespace = "capd-system"
+		providerURL = fmt.Sprintf("https://github.com/kubernetes-sigs/cluster-api/releases/download/%s/infrastructure-components-development.yaml", capiVersion)
 	case "harvester":
 		namespace = "capk-system"
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"

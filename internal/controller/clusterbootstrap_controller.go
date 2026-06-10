@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -26,7 +27,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -47,6 +50,10 @@ const (
 type ClusterBootstrapReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// RestConfig is the management cluster's REST config. For the local provider it
+	// is used to synthesize an in-cluster kubeconfig so addons install onto the kind
+	// cluster the controller already runs in (no separate cluster is provisioned).
+	RestConfig *rest.Config
 	// TalosClient handles Talos operations
 	TalosClient TalosClientInterface
 	// AddonInstaller handles addon installations
@@ -248,6 +255,48 @@ func (r *ClusterBootstrapReconciler) reconcileDelete(ctx context.Context, cb *bu
 	return ctrl.Result{}, nil
 }
 
+// inClusterKubeconfig synthesizes a kubeconfig pointing at the management cluster the
+// controller runs in, from the manager's REST config. The local provider installs addons
+// onto this same cluster, and the addon installers (helm, kubectl, clusterctl) require
+// kubeconfig bytes rather than a rest.Config.
+func (r *ClusterBootstrapReconciler) inClusterKubeconfig() ([]byte, error) {
+	cfg := r.RestConfig
+	if cfg == nil {
+		return nil, fmt.Errorf("RestConfig not set; cannot build in-cluster kubeconfig")
+	}
+
+	caData := cfg.CAData
+	if len(caData) == 0 && cfg.CAFile != "" {
+		data, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA file: %w", err)
+		}
+		caData = data
+	}
+
+	token := cfg.BearerToken
+	if token == "" && cfg.BearerTokenFile != "" {
+		data, err := os.ReadFile(cfg.BearerTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read token file: %w", err)
+		}
+		token = string(data)
+	}
+
+	const name = "management"
+	apiCfg := clientcmdapi.NewConfig()
+	apiCfg.Clusters[name] = &clientcmdapi.Cluster{
+		Server:                   cfg.Host,
+		CertificateAuthorityData: caData,
+		InsecureSkipTLSVerify:    len(caData) == 0,
+	}
+	apiCfg.AuthInfos[name] = &clientcmdapi.AuthInfo{Token: token}
+	apiCfg.Contexts[name] = &clientcmdapi.Context{Cluster: name, AuthInfo: name}
+	apiCfg.CurrentContext = name
+
+	return clientcmd.Write(*apiCfg)
+}
+
 func (r *ClusterBootstrapReconciler) reconcilePending(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciling Pending phase")
@@ -269,6 +318,19 @@ func (r *ClusterBootstrapReconciler) reconcilePending(ctx context.Context, cb *b
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// The local provider installs Butler onto the existing kind cluster the controller
+	// runs in. There is no infrastructure to provision, no Talos to configure, and no
+	// pivot, so skip straight to the addon install phase.
+	if cb.IsLocal() {
+		cb.Status.Phase = butlerv1alpha1.ClusterBootstrapPhaseInstallingAddons
+		cb.Status.LastUpdated = metav1.Now()
+		if err := r.Status().Update(ctx, cb); err != nil {
+			return ctrl.Result{}, err
+		}
+		logger.Info("Local provider: skipping provisioning, transitioning to InstallingAddons")
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Transition to ProvisioningMachines
@@ -813,7 +875,21 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	// Always ensure map is initialized at start
 	r.ensureAddonsMap(cb)
 
-	kubeconfig, _ := base64.StdEncoding.DecodeString(cb.Status.Kubeconfig)
+	// Resolve the install target kubeconfig. For provisioned clusters this comes from
+	// the Talos bootstrap (stored in status). For the local provider there is no
+	// provisioned cluster: addons install onto the kind cluster the controller already
+	// runs in, so synthesize an in-cluster kubeconfig from the manager's REST config.
+	var kubeconfig []byte
+	if cb.IsLocal() {
+		kc, err := r.inClusterKubeconfig()
+		if err != nil {
+			logger.Error(err, "Failed to build in-cluster kubeconfig for local install")
+			return ctrl.Result{RequeueAfter: requeueShort}, nil
+		}
+		kubeconfig = kc
+	} else {
+		kubeconfig, _ = base64.StdEncoding.DecodeString(cb.Status.Kubeconfig)
+	}
 
 	// Set node IP for direct access before VIP is available
 	cpIPs := r.getControlPlaneIPs(cb)
@@ -827,7 +903,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	// Cloud providers (gcp, aws, azure) skip kube-vip because cloud networks
 	// do not support gratuitous ARP. Cloud HA uses a cloud load balancer instead.
 	if !r.isAddonInstalled(cb, "kube-vip") {
-		if cb.Spec.Network.VIP != "" && !cb.IsCloudProvider() {
+		if cb.Spec.Network.VIP != "" && !cb.IsCloudProvider() && !cb.IsLocal() {
 			logger.Info("Installing kube-vip")
 			version := "v0.8.7"
 			if addons.ControlPlaneHA != nil && addons.ControlPlaneHA.Version != "" {
@@ -956,8 +1032,10 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 4. Longhorn storage - use topology-aware replica count
-	if addons.Storage != nil && addons.Storage.Type == "longhorn" {
+	// 4. Longhorn storage - use topology-aware replica count.
+	// The local provider skips Longhorn and relies on kind's built-in default
+	// StorageClass (local-path / standard), which is sufficient for a laptop demo.
+	if addons.Storage != nil && addons.Storage.Type == "longhorn" && !cb.IsLocal() {
 		if !r.isAddonInstalled(cb, "longhorn") {
 			logger.Info("Installing Longhorn")
 			version := addons.Storage.Version
@@ -1272,9 +1350,16 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// Transition to Pivoting
-	logger.Info("All addons installed, transitioning to Pivoting")
-	cb.Status.Phase = butlerv1alpha1.ClusterBootstrapPhasePivoting
+	// The local provider is already running on its target cluster, so there is nothing
+	// to pivot to: go straight to Ready. Provisioned clusters pivot the management plane
+	// onto the new cluster first.
+	nextPhase := butlerv1alpha1.ClusterBootstrapPhasePivoting
+	if cb.IsLocal() {
+		nextPhase = butlerv1alpha1.ClusterBootstrapPhaseReady
+	}
+
+	logger.Info("All addons installed", "nextPhase", nextPhase)
+	cb.Status.Phase = nextPhase
 	cb.Status.LastUpdated = metav1.Now()
 	if err := r.Status().Update(ctx, cb); err != nil {
 		return ctrl.Result{}, err
@@ -1446,6 +1531,11 @@ func (r *ClusterBootstrapReconciler) getDefaultVIPInterface(provider string) str
 func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (*addons.ProviderCredentials, error) {
 	logger := log.FromContext(ctx)
 
+	// The local provider has no credentials Secret.
+	if cb.IsLocal() {
+		return &addons.ProviderCredentials{}, nil
+	}
+
 	// Get ProviderConfig
 	providerConfig := &butlerv1alpha1.ProviderConfig{}
 	providerNS := cb.Spec.ProviderRef.Namespace
@@ -1520,7 +1610,7 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 		logger.Info("Retrieved GCP credentials", "projectID", creds.GCP.ProjectID, "region", creds.GCP.Region)
 	case "aws":
 		creds.AWS = &addons.AWSCredentials{
-			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			AccessKeyID:     string(secret.Data["accessKeyID"]),
 			SecretAccessKey: string(secret.Data["secretAccessKey"]),
 			Region:          providerConfig.Spec.AWS.Region,
 		}
@@ -1556,6 +1646,11 @@ func (r *ClusterBootstrapReconciler) getProviderCredentials(ctx context.Context,
 func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Context, cb *butlerv1alpha1.ClusterBootstrap) (*addons.ProviderCredentials, error) {
 	logger := log.FromContext(ctx)
 	creds := &addons.ProviderCredentials{}
+
+	// The local provider has no credentials Secret.
+	if cb.IsLocal() {
+		return creds, nil
+	}
 
 	// Get the ProviderConfig from the local (KIND) cluster
 	providerConfig := &butlerv1alpha1.ProviderConfig{}
@@ -1644,7 +1739,7 @@ func (r *ClusterBootstrapReconciler) extractProviderCredentials(ctx context.Cont
 			return nil, fmt.Errorf("ProviderConfig %s has no aws configuration", providerConfigKey)
 		}
 		creds.AWS = &addons.AWSCredentials{
-			AccessKeyID:    string(secret.Data["accessKeyID"]),
+			AccessKeyID:     string(secret.Data["accessKeyID"]),
 			SecretAccessKey: string(secret.Data["secretAccessKey"]),
 			Region:          providerConfig.Spec.AWS.Region,
 			VPCID:           providerConfig.Spec.AWS.VPCID,
@@ -1928,11 +2023,11 @@ func (r *ClusterBootstrapReconciler) reconcileImageSync(ctx context.Context, cb 
 			Name:      imageSyncName,
 			Namespace: cb.Namespace,
 			Labels: map[string]string{
-				butlerv1alpha1.LabelManagedBy:       "butler",
-				butlerv1alpha1.LabelSchematicID:     labelSchematicID,
-				butlerv1alpha1.LabelImageVersion:    version,
-				butlerv1alpha1.LabelProviderConfig:  cb.Spec.ProviderRef.Name,
-				butlerv1alpha1.LabelImageArch:       arch,
+				butlerv1alpha1.LabelManagedBy:      "butler",
+				butlerv1alpha1.LabelSchematicID:    labelSchematicID,
+				butlerv1alpha1.LabelImageVersion:   version,
+				butlerv1alpha1.LabelProviderConfig: cb.Spec.ProviderRef.Name,
+				butlerv1alpha1.LabelImageArch:      arch,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{

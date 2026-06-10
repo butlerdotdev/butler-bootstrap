@@ -195,6 +195,7 @@ func main() {
 	if err := (&controller.ClusterBootstrapReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
+		RestConfig:     mgr.GetConfig(),
 		TalosClient:    talosClient,
 		AddonInstaller: addonInstaller,
 	}).SetupWithManager(mgr); err != nil {
