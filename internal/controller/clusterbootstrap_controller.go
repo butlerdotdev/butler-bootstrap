@@ -1196,8 +1196,10 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 		}
 	}
 
-	// 9.5. Butler CRDs
-	if addons.IsButlerControllerEnabled() {
+	// 9.5. Butler CRDs. For the local provider the orchestrator already applied the
+	// Butler CRDs to this cluster via kubectl, so the Helm chart would fail trying to
+	// adopt CRDs it does not own. Skip it; the CRDs are already present.
+	if addons.IsButlerControllerEnabled() && !cb.IsLocal() {
 		if !r.isAddonInstalled(cb, "butler-crds") {
 			logger.Info("Installing Butler CRDs")
 
