@@ -130,6 +130,8 @@ spec:
                   - nutanix: "username", "password"
                   - proxmox: "username", "password" or "token"
                   - gcp: "serviceAccountKey" (JSON service account key)
+                  Required for all providers except "local", which needs no credentials.
+                  The per-provider requirement is enforced by the ProviderConfig admission webhook.
                 properties:
                   key:
                     description: |-
@@ -249,6 +251,18 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+              local:
+                description: |-
+                  Local contains local-provider configuration.
+                  Optional when provider is "local".
+                properties:
+                  kindNodeImage:
+                    description: |-
+                      KindNodeImage overrides the container image used for tenant worker nodes,
+                      for example "kindest/node:v1.30.0". When empty, the image is derived from
+                      the tenant cluster's Kubernetes version.
+                    type: string
+                type: object
               network:
                 description: Network configures IPAM and network settings for this
                   provider.
@@ -349,6 +363,14 @@ spec:
                     description: Subnet is the network name for VM placement (e.g.,
                       "VM Network - VLAN 40").
                     type: string
+                  timeServers:
+                    description: |-
+                      TimeServers are the default NTP servers for Talos worker nodes on this provider.
+                      Falls back to ButlerConfig.spec.defaultTimeServers if empty.
+                      Required on networks where the Talos default (time.cloudflare.com) is unreachable.
+                    items:
+                      type: string
+                    type: array
                 type: object
               nutanix:
                 description: |-
@@ -397,6 +419,7 @@ spec:
                 - azure
                 - aws
                 - gcp
+                - local
                 type: string
               proxmox:
                 description: |-
@@ -474,7 +497,6 @@ spec:
                     type: string
                 type: object
             required:
-            - credentialsRef
             - provider
             type: object
           status:
