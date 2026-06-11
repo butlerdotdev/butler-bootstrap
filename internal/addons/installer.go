@@ -1106,7 +1106,7 @@ func (i *Installer) InstallGatewayAPI(ctx context.Context, kubeconfig []byte, ve
 }
 
 // InstallSteward installs Steward for hosted control planes (replaces Kamaji)
-func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, version string) error {
+func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, version string, localProfile bool) error {
 	logger := log.FromContext(ctx)
 	kubeconfigPath, cleanup, err := i.writeKubeconfig(kubeconfig)
 	if err != nil {
@@ -1118,7 +1118,7 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 		version = "0.3.0"
 	}
 
-	logger.Info("Installing Steward", "version", version)
+	logger.Info("Installing Steward", "version", version, "localProfile", localProfile)
 
 	// Ensure namespace exists and is privileged
 	if err := i.ensurePrivilegedNamespace(ctx, kubeconfigPath, "steward-system"); err != nil {
@@ -1136,6 +1136,21 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 		"--set", "steward-etcd.deploy=true",
 		"--wait",
 		"--timeout", "5m",
+	}
+
+	if localProfile {
+		// Single-node dev cluster: run a single etcd member with guaranteed CPU.
+		// The default 3-replica best-effort etcd gets starved on a constrained node,
+		// which makes the hosted apiserver lose etcd and crashloop. No HA is needed
+		// locally. Also use the locally built and loaded steward image, which carries
+		// fixes not yet in a published release.
+		args = append(args,
+			"--set", "steward-etcd.replicas=1",
+			"--set", "steward-etcd.resources.requests.cpu=200m",
+			"--set", "steward-etcd.resources.requests.memory=256Mi",
+			"--set", "image.tag=latest",
+			"--set", "image.pullPolicy=IfNotPresent",
+		)
 	}
 
 	if err := i.runHelm(ctx, kubeconfigPath, args...); err != nil {

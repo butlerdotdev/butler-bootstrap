@@ -112,7 +112,7 @@ type AddonInstallerInterface interface {
 	InstallCloudControllerManager(ctx context.Context, kubeconfig []byte, provider string, clusterName string, creds *addons.ProviderCredentials) error
 	InstallTraefik(ctx context.Context, kubeconfig []byte, version string) error
 	InstallGatewayAPI(ctx context.Context, kubeconfig []byte, version string) error
-	InstallSteward(ctx context.Context, kubeconfig []byte, version string) error
+	InstallSteward(ctx context.Context, kubeconfig []byte, version string, localProfile bool) error
 	InstallFlux(ctx context.Context, kubeconfig []byte) error
 	InstallButler(ctx context.Context, kubeconfig []byte) error
 	InstallButlerCRDs(ctx context.Context, kubeconfig []byte, version string) error
@@ -1130,7 +1130,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 				version = addons.ControlPlaneProvider.Version
 			}
 
-			if err := r.AddonInstaller.InstallSteward(ctx, kubeconfig, version); err != nil {
+			if err := r.AddonInstaller.InstallSteward(ctx, kubeconfig, version, cb.IsLocal()); err != nil {
 				logger.Error(err, "Failed to install Steward")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
