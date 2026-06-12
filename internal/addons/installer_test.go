@@ -16,7 +16,31 @@ limitations under the License.
 
 package addons
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestGenerateLocalProviderConfig(t *testing.T) {
+	i := &Installer{}
+	manifest := i.generateLocalProviderConfig()
+
+	for _, want := range []string{
+		"kind: ProviderConfig",
+		"name: local",
+		"provider: local",
+		"type: platform",
+		"mode: cloud",
+	} {
+		if !strings.Contains(manifest, want) {
+			t.Errorf("local ProviderConfig manifest missing %q:\n%s", want, manifest)
+		}
+	}
+
+	if strings.Contains(manifest, "credentialsRef") {
+		t.Errorf("local ProviderConfig must not reference credentials:\n%s", manifest)
+	}
+}
 
 func TestSplitImageRef(t *testing.T) {
 	cases := []struct {

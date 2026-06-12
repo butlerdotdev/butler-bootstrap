@@ -130,6 +130,8 @@ spec:
                   - nutanix: "username", "password"
                   - proxmox: "username", "password" or "token"
                   - gcp: "serviceAccountKey" (JSON service account key)
+                  Required for all providers except "local", which needs no credentials.
+                  The per-provider requirement is enforced by the ProviderConfig admission webhook.
                 properties:
                   key:
                     description: |-
@@ -248,6 +250,18 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                type: object
+              local:
+                description: |-
+                  Local contains local-provider configuration.
+                  Optional when provider is "local".
+                properties:
+                  kindNodeImage:
+                    description: |-
+                      KindNodeImage overrides the container image used for tenant worker nodes,
+                      for example "kindest/node:v1.30.0". When empty, the image is derived from
+                      the tenant cluster's Kubernetes version.
+                    type: string
                 type: object
               network:
                 description: Network configures IPAM and network settings for this
@@ -405,6 +419,7 @@ spec:
                 - azure
                 - aws
                 - gcp
+                - local
                 type: string
               proxmox:
                 description: |-
@@ -482,7 +497,6 @@ spec:
                     type: string
                 type: object
             required:
-            - credentialsRef
             - provider
             type: object
           status:
