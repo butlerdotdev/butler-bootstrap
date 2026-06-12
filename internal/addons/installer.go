@@ -1115,7 +1115,7 @@ func (i *Installer) InstallSteward(ctx context.Context, kubeconfig []byte, versi
 	defer cleanup()
 
 	if version == "" {
-		version = "0.3.0"
+		version = "0.4.0"
 	}
 
 	logger.Info("Installing Steward", "version", version, "localProfile", localProfile)
@@ -1234,7 +1234,7 @@ func (i *Installer) InstallButlerCRDs(ctx context.Context, kubeconfig []byte, ve
 	}
 
 	if version == "" {
-		version = "0.6.0"
+		version = "0.20.0"
 	}
 
 	args := []string{
@@ -1281,7 +1281,7 @@ func (i *Installer) InstallButlerAddons(ctx context.Context, kubeconfig []byte, 
 	defer cleanup()
 
 	if version == "" {
-		version = "0.1.0"
+		version = "0.8.4"
 	}
 
 	args := []string{
@@ -1880,7 +1880,7 @@ func (i *Installer) InstallCAPI(ctx context.Context, kubeconfig []byte, version 
 	// Install Steward CAPI provider manually
 	// Use server-side apply to avoid annotation size limit (CRD is too large for client-side apply)
 	logger.Info("Installing Steward CAPI provider manually")
-	stewardURL := "https://github.com/butlerdotdev/cluster-api-control-plane-provider-steward/releases/download/v0.1.0/control-plane-components.yaml"
+	stewardURL := "https://github.com/butlerdotdev/cluster-api-control-plane-provider-steward/releases/download/v0.3.0/control-plane-components.yaml"
 	if err := i.runKubectl(ctx, kubeconfigPath, "apply", "--server-side", "--force-conflicts", "-f", stewardURL); err != nil {
 		return fmt.Errorf("failed to install Steward CAPI provider: %w", err)
 	}
@@ -1956,7 +1956,7 @@ func (i *Installer) installInfraProvider(ctx context.Context, kubeconfigPath str
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-kubevirt/releases/download/v0.1.9/infrastructure-components.yaml"
 	case "nutanix":
 		namespace = "capx-system"
-		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.4.0/infrastructure-components.yaml"
+		providerURL = "https://github.com/nutanix-cloud-native/cluster-api-provider-nutanix/releases/download/v1.8.4/infrastructure-components.yaml"
 	case "vsphere":
 		namespace = "capv-system"
 		providerURL = "https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/releases/download/v1.11.0/infrastructure-components.yaml"
@@ -2175,7 +2175,7 @@ func (i *Installer) InstallButlerController(ctx context.Context, kubeconfig []by
 	}
 
 	if version == "" {
-		version = "0.12.1"
+		version = "0.27.0"
 	}
 
 	repo, tag := splitImageRef(image)
@@ -2231,7 +2231,7 @@ func splitImageRef(ref string) (string, string) {
 func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec *butlerv1alpha1.ConsoleAddonSpec, clusterName string, provider string) (string, error) {
 	logger := log.FromContext(ctx)
 
-	version := "0.4.1"
+	version := "0.13.4"
 	if spec != nil && spec.Version != "" && !strings.EqualFold(spec.Version, "latest") {
 		version = spec.Version
 	}
@@ -2255,11 +2255,7 @@ func (i *Installer) InstallConsole(ctx context.Context, kubeconfig []byte, spec 
 		return "", fmt.Errorf("failed to prepare steward-system namespace: %w", err)
 	}
 
-	// Build helm values
-	values := []string{
-		"server.image.tag=latest",
-		"frontend.image.tag=latest",
-	}
+	values := []string{}
 
 	// Configure ingress if enabled
 	if spec != nil && spec.Ingress != nil && spec.Ingress.Enabled {

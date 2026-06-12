@@ -210,23 +210,21 @@ spec:
                 description: HelmRelease contains Helm release information.
                 properties:
                   name:
-                    description: Name is the Helm release name.
+                    description: Name is the name of the Helm release
                     type: string
                   namespace:
-                    description: Namespace is the release namespace.
+                    description: Namespace is the namespace where the release is installed
                     type: string
                   revision:
-                    description: Revision is the Helm revision number.
-                    format: int32
+                    description: Revision is the Helm release revision number
                     type: integer
                   status:
-                    description: Status is the Helm release status.
+                    description: Status is the Helm release status (deployed, failed,
+                      etc.)
                     type: string
-                required:
-                - name
-                - namespace
-                - revision
-                - status
+                  version:
+                    description: Version is the chart version
+                    type: string
                 type: object
               installedVersion:
                 description: InstalledVersion is the currently installed version.

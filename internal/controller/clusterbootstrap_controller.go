@@ -1110,7 +1110,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	// Install before Steward so the CRDs exist when Steward starts watching them
 	if !r.isAddonInstalled(cb, "gateway-api") {
 		logger.Info("Installing Gateway API CRDs")
-		if err := r.AddonInstaller.InstallGatewayAPI(ctx, kubeconfig, "v1.2.0"); err != nil {
+		if err := r.AddonInstaller.InstallGatewayAPI(ctx, kubeconfig, "v1.2.1"); err != nil {
 			logger.Error(err, "Failed to install Gateway API CRDs")
 			return ctrl.Result{RequeueAfter: requeueShort}, nil
 		}
@@ -1235,7 +1235,7 @@ func (r *ClusterBootstrapReconciler) reconcileInstallingAddons(ctx context.Conte
 	if addons.IsButlerControllerEnabled() {
 		if !r.isAddonInstalled(cb, "butler-addons") {
 			logger.Info("Installing Butler addon definitions")
-			if err := r.AddonInstaller.InstallButlerAddons(ctx, kubeconfig, "0.1.0"); err != nil {
+			if err := r.AddonInstaller.InstallButlerAddons(ctx, kubeconfig, "0.8.4"); err != nil {
 				logger.Error(err, "Failed to install Butler addon definitions")
 				return ctrl.Result{RequeueAfter: requeueShort}, nil
 			}
